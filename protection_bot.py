@@ -209,9 +209,7 @@ elif data == "btn_1":
             "↢ مسح الرابط | انشاء رابط | ضع الترحيب | ضع قوانين | ضـع رابط | اضف امر | تعيين الايدي\n"
             f"قناة تحديثات اريا : {CHANNEL_USER} 🦦"
         )
-        await event.edit(text_2, buttons=BACK_BUTTON)
-
-    elif data == "btn_3":
+        await event.edit(text_2, buttons=BACK_BUTTON) elif data == "btn_3":
         text_3 = (
             "- قائمة القفل - التعطيل :\n\n"
             "اولا : اوامر القفل والفتح :\n"
