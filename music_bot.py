@@ -1,6 +1,8 @@
+import asyncio
 import json
 import logging
 import os
+import re
 import uuid
 
 import yt_dlp
@@ -19,6 +21,18 @@ API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 DEV_ID = 6913101408  # المطور: كل الإعدادات من الخاص
 
+# كوكيز يوتيوب اختيارية (تسويها لاحقاً لو حبيت): تلصق محتوى ملف cookies.txt
+YOUTUBE_COOKIES = os.environ.get("YOUTUBE_COOKIES", "").strip()
+COOKIE_FILE = None
+if YOUTUBE_COOKIES:
+    try:
+        COOKIE_FILE = "/tmp/yt_cookies.txt"
+        with open(COOKIE_FILE, "w") as f:
+            f.write(YOUTUBE_COOKIES)
+        log.info("YouTube cookies loaded from env")
+    except Exception as e:
+        log.error(f"cookies write error: {e}")
+
 if not (API_ID and API_HASH and BOT_TOKEN):
     raise SystemExit("ناقص متغيرات البيئة: API_ID, API_HASH, BOT_TOKEN")
 
@@ -32,12 +46,8 @@ PLAYING = {}       # chat_id -> item الشغال حاليا
 PAUSED = {}        # chat_id -> True/False
 LOOP = {}          # chat_id -> True/False
 VOLUME = {}        # chat_id -> رقم الصوت
-MSG_IDS = {}       # chat_id -> id رسالة "يشغل الآن" (عشان نعدلها)
+MSG_IDS = {}       # chat_id -> id رسالة "يشغل الآن"
 SEARCH_CACHE = {}  # مفتاح البحث -> بيانات الأغنية
-
-AUDIO_WORDS = ("تشغيل", "شغل")
-VIDEO_WORDS = ("فيديو", "فيد")
-SEARCH_WORDS = ("يوت", "بحث")
 
 CONFIG_FILE = "config.json"
 DEFAULT_CONFIG = {
@@ -75,15 +85,6 @@ VIDEO_QUALITY_MAP = {
 }
 AUDIO_Q_LABEL = {"high": "عالية", "medium": "متوسطة", "low": "منخفضة"}
 
-YTDLP_OPTS = {
-    "quiet": True,
-    "no_warnings": True,
-    "noplaylist": True,
-    "skip_download": True,
-    "nocheckcertificate": True,
-    "geo_bypass": True,
-}
-
 HELP_TEXT = (
     f"🎵 <b>{BOT_NAME}</b>\n\n"
     "• <code>شغل</code> + اسم الأغنية ← تشغيل صوت 🎵\n"
@@ -96,30 +97,186 @@ HELP_TEXT = (
     "• <code>تكرار</code> ← تشغيل الأغنية على طول 🔁\n"
     "• <code>الصوت</code> + رقم (مثال: الصوت 200) 🔊\n"
     "• <code>قائمة</code> ← عرض قائمة الانتظار 📝\n"
-    "• <code>الوقت</code> ← وين وصلت الأغنية ⏱\n\n"
+    "• <code>الوقت</code> ← وين وصلت الأغنية ⏱\n"
+    "• تقدر تلصق <b>رابط يوتيوب أو ساوند كلاود</b> مباشرة 🔗\n\n"
     "⚠️ لازم تكون المكالمة الصوتية مفتوحة والبوت أدمن"
 )
 
 
-# ================== بحث يوتيوب ==================
-def search_track(query: str) -> dict:
-    q = query if query.startswith("http") else f"ytsearch1:{query}"
-    with yt_dlp.YoutubeDL(YTDLP_OPTS) as ydl:
-        info = ydl.extract_info(q, download=False)
-    if info and "entries" in info:
-        entries = [e for e in info["entries"] if e]
-        if not entries:
-            raise ValueError("no results")
-        info = entries[0]
-    url = info.get("webpage_url") or info.get("original_url") or info.get("url")
-    if not url:
-        raise ValueError("no url")
+# ================== مصادر التشغيل ==================
+class SourceError(Exception):
+    pass
+
+
+def ydl_opts(client=None, flat=False):
+    o = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "skip_download": True,
+        "nocheckcertificate": True,
+        "geo_bypass": True,
+        "socket_timeout": 25,
+    }
+    if COOKIE_FILE:
+        o["cookiefile"] = COOKIE_FILE
+    if flat:
+        o["extract_flat"] = "in_playlist"
+    if client and client != "default":
+        o["extractor_args"] = {"youtube": {"player_client": [client]}}
+    return o
+
+
+def flat_search(query, n=5):
+    """بحث سريع في يوتيوب بدون فتح صفحة الفيديو (ما ينحجب)"""
+    with yt_dlp.YoutubeDL(ydl_opts(flat=True)) as ydl:
+        info = ydl.extract_info(f"ytsearch{n}:{query}", download=False)
+    entries = [e for e in (info or {}).get("entries", []) if e and e.get("id")]
+    if not entries:
+        raise SourceError("no yt results")
+    best = next((e for e in entries if e.get("duration")), entries[0])
+    vid = best["id"]
     return {
-        "title": info.get("title") or "غير معروف",
-        "url": url,
+        "title": best.get("title") or query,
+        "url": f"https://www.youtube.com/watch?v={vid}",
+        "dur": int(best.get("duration") or 0),
+        "thumb": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+    }
+
+
+def pick_format(info, want_video):
+    """يختار أفضل رابط تشغيل مباشر من بيانات yt-dlp"""
+    fmts = info.get("formats") or []
+    if want_video:
+        combined = [f for f in fmts
+                    if f.get("vcodec") not in (None, "none")
+                    and f.get("acodec") not in (None, "none")
+                    and f.get("url")]
+        chosen = combined[-1] if combined else None
+    else:
+        audio = [f for f in fmts
+                 if f.get("acodec") not in (None, "none")
+                 and f.get("vcodec") in (None, "none")
+                 and f.get("url")]
+        if not audio:
+            audio = [f for f in fmts if f.get("acodec") not in (None, "none") and f.get("url")]
+        chosen = audio[-1] if audio else None
+    if not chosen or not chosen.get("url"):
+        if info.get("url"):
+            chosen = {"url": info["url"]}
+        else:
+            raise SourceError("no formats")
+    return {
+        "stream_url": chosen["url"],
+        "title": info.get("title") or "",
         "dur": int(info.get("duration") or 0),
         "thumb": info.get("thumbnail"),
     }
+
+
+YT_CLIENTS = ["default", "ios", "mweb", "tv", "web_safari"]
+
+
+def yt_full_extract(url, want_video=False):
+    """يجرب عدة واجهات يوتيوب عشان يتفادى الحجب"""
+    last_err = None
+    for client in YT_CLIENTS:
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts(client=client)) as ydl:
+                info = ydl.extract_info(url, download=False)
+            if not info:
+                raise SourceError("empty info")
+            return pick_format(info, want_video)
+        except Exception as ex:
+            last_err = ex
+            log.warning(f"extract via {client} failed: {str(ex)[:120]}")
+            continue
+    raise SourceError(last_err or "all clients failed")
+
+
+def sc_fallback(title):
+    """بحث بديل في ساوند كلاود (ما ينحجب من سيرفرات الاستضافة)"""
+    with yt_dlp.YoutubeDL(ydl_opts()) as ydl:
+        info = ydl.extract_info(f"scsearch4:{title}", download=False)
+    for e in (info or {}).get("entries") or []:
+        if not e:
+            continue
+        fmts = [f for f in (e.get("formats") or []) if f.get("acodec") not in (None, "none") and f.get("url")]
+        if not fmts:
+            continue
+        return {
+            "stream_url": fmts[-1]["url"],
+            "title": e.get("title") or title,
+            "dur": int(e.get("duration") or 0),
+            "thumb": e.get("thumbnail"),
+        }
+    raise SourceError("no sc results")
+
+
+def resolve_stream(item):
+    """يحول الأغنية إلى رابط تشغيل مباشر، مع سقوط تلقائي لساوند كلاود"""
+    if item.get("stream_url"):
+        return item["stream_url"]
+    last_err = None
+    try:
+        res = yt_full_extract(item["url"], want_video=bool(item.get("video")))
+        item.update(res)
+        item["source"] = "youtube"
+        return res["stream_url"]
+    except Exception as ex:
+        last_err = ex
+        log.warning(f"youtube blocked, trying soundcloud: {str(ex)[:100]}")
+        try:
+            res = sc_fallback(item["title"])
+            res["video"] = False  # ساوند كلاود صوت فقط
+            item.update(res)
+            item["source"] = "soundcloud"
+            return res["stream_url"]
+        except Exception as ex2:
+            raise SourceError(f"{last_err} / {ex2}")
+
+
+def search_track(query):
+    """يبحث عن الأغنية ويرجع بياناتها الأساسية"""
+    if re.match(r"^https?://", query):
+        is_sc = "soundcloud.com" in query
+        is_yt = ("youtube.com" in query) or ("youtu.be" in query)
+        if is_sc:
+            with yt_dlp.YoutubeDL(ydl_opts()) as ydl:
+                info = ydl.extract_info(query, download=False)
+            if not info:
+                raise SourceError("bad sc url")
+            item = pick_format(info, False)
+            item["url"] = query
+            item["source"] = "soundcloud"
+            return item
+        if is_yt:
+            vid = None
+            m = re.search(r"(?:v=|youtu\.be/|shorts/)([\w-]{11})", query)
+            if m:
+                vid = m.group(1)
+            item = {
+                "title": "يوتيوب",
+                "url": f"https://www.youtube.com/watch?v={vid}" if vid else query,
+                "dur": 0,
+                "thumb": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg" if vid else None,
+            }
+            try:
+                # جرّب نجيب العنوان فوراً (بحث مسطح ما ينحجب)
+                with yt_dlp.YoutubeDL(ydl_opts(flat=True)) as ydl:
+                    info = ydl.extract_info(item["url"], download=False)
+                if info and info.get("title"):
+                    item["title"] = info["title"]
+                    item["dur"] = int(info.get("duration") or 0)
+            except Exception:
+                pass
+            return item
+        # رابط مباشر لملف صوت/فيديو
+        return {"title": query.split("/")[-1][:60], "url": query,
+                "stream_url": query, "dur": 0, "source": "direct"}
+
+    # بحث نصي: يوتيوب (مسطح)
+    return flat_search(query)
 
 
 def fmt_dur(seconds: int) -> str:
@@ -129,13 +286,16 @@ def fmt_dur(seconds: int) -> str:
 
 def now_caption(item: dict) -> str:
     vol = VOLUME.get(item.get("_chat_id", 0), 100)
+    mode = "🎬 فيديو" if item.get("video") else "🎵 صوت"
     cap = (
-        f"{'🎬 فيديو' if item.get('video') else '🎵 صوت'} <b>• تبدا تشتغل الآن</b>\n\n"
+        f"{mode} <b>• تبدا تشتغل الآن</b>\n\n"
         f"📀 <b>العنوان:</b> {item['title']}\n"
-        f"⏱ <b>المدة:</b> {fmt_dur(item['dur']) if item['dur'] else 'غير معروفة'}\n"
+        f"⏱ <b>المدة:</b> {fmt_dur(item['dur']) if item.get('dur') else 'غير معروفة'}\n"
         f"👤 <b>طلبها:</b> {item.get('by') or '-'}\n"
         f"🔊 <b>الصوت:</b> {vol}"
     )
+    if item.get("source") == "soundcloud":
+        cap += "\n🎧 <b>المصدر:</b> ساوند كلاود (يوتيوب محجوب مؤقتاً)"
     if LOOP.get(item.get("_chat_id", 0)):
         cap += "\n🔁 <b>التكرار:</b> مفعل"
     return cap
@@ -186,7 +346,7 @@ async def send_queued(chat_id: int, item: dict, pos: int):
     cap = (
         f"📝 <b>انضافت للقائمة</b> • الموقع {pos}\n\n"
         f"📀 <b>العنوان:</b> {item['title']}\n"
-        f"⏱ <b>المدة:</b> {fmt_dur(item['dur']) if item['dur'] else 'غير معروفة'}\n"
+        f"⏱ <b>المدة:</b> {fmt_dur(item['dur']) if item.get('dur') else 'غير معروفة'}\n"
         f"👤 <b>طلبها:</b> {item.get('by') or '-'}"
     )
     await _send_plain_media(chat_id, cap, item)
@@ -215,13 +375,17 @@ async def _send_plain_media(chat_id: int, cap: str, item: dict):
 # ================== التشغيل ==================
 def build_stream(item: dict) -> MediaStream:
     aq = AUDIO_QUALITY_MAP.get(CONFIG.get("audio_q"), AudioQuality.HIGH)
+    url = item.get("stream_url") or item["url"]
     if item.get("video"):
         vq = VIDEO_QUALITY_MAP.get(CONFIG.get("video_q"), VideoQuality.HD_720p)
-        return MediaStream(item["url"], aq, vq)
-    return MediaStream(item["url"], aq)
+        return MediaStream(url, aq, vq)
+    return MediaStream(url, aq)
 
 
 async def play_item(chat_id: int, item: dict):
+    # نجيب رابط التشغيل في وقت التشغيل (ما تنتهي صلاحيته وهو بالقائمة)
+    if not item.get("stream_url"):
+        item["stream_url"] = await asyncio.to_thread(resolve_stream, item)
     await call_py.play(chat_id, build_stream(item))
     PLAYING[chat_id] = item
     PAUSED[chat_id] = False
@@ -239,9 +403,10 @@ async def cleanup_chat(chat_id: int):
 async def play_next(chat_id: int):
     if LOOP.get(chat_id) and chat_id in PLAYING:
         item = PLAYING[chat_id]
+        # نعيد جلب الرابط عشان ما تنتهي صلاحيته
+        item.pop("stream_url", None)
         try:
-            await call_py.play(chat_id, build_stream(item))
-            PAUSED[chat_id] = False
+            await play_item(chat_id, item)
             await bot.send_message(chat_id, f"🔁 <b>تكرار:</b> رجعت شغلت {item['title']}")
             return
         except Exception as e:
@@ -298,6 +463,7 @@ async def start_playing(m, item: dict, video: bool, edit=None):
             log.error(f"video play error: {e}")
             try:
                 item["video"] = False
+                item.pop("stream_url", None)
                 await play_item(chat_id, item)
                 msg = (
                     "⚠️ ما فيه مكالمة فيديو مفتوحة، شغلتها صوت 🎵\n\n"
@@ -328,25 +494,35 @@ async def start_playing(m, item: dict, video: bool, edit=None):
 
 async def handle_play(m, query: str, video: bool):
     try:
-        item = search_track(query)
+        item = await asyncio.to_thread(search_track, query)
+    except SourceError:
+        await m.reply("❌ ما لقيت الأغنية، جرّب اسم ثاني")
+        return
     except Exception as e:
         log.error(f"search error: {e}")
-        await m.reply("❌ ما لقيت الأغنية، جرّب اسم ثاني")
+        await m.reply("❌ صار خطأ بالبحث، جرّب مرة ثانية")
         return
     item["video"] = video
     item["by"] = (m.from_user.first_name if m.from_user else "") or ""
-    await start_playing(m, item, video)
+    status = await m.reply("🔎 جاري تجهيز الأغنية...")
+    try:
+        await start_playing(m, item, video)
+    finally:
+        try:
+            await status.delete()
+        except Exception:
+            pass
 
 
 async def handle_search_buttons(m, query: str):
     try:
-        item = search_track(query)
+        item = await asyncio.to_thread(search_track, query)
     except Exception:
         await m.reply("❌ ما لقيت شي بهالاسم، جرّب اسم ثاني")
         return
     key = uuid.uuid4().hex[:10]
     SEARCH_CACHE[key] = {"item": item, "chat_id": m.chat.id}
-    dur = fmt_dur(item["dur"]) if item["dur"] else ""
+    dur = fmt_dur(item["dur"]) if item.get("dur") else ""
     markup = InlineKeyboardMarkup(
         [[
             InlineKeyboardButton("🎬 فيديو", callback_data=f"pl:{key}:v"),
@@ -397,6 +573,7 @@ async def on_button(client, cq):
                 log.error(f"video play error: {e}")
                 try:
                     item["video"] = False
+                    item.pop("stream_url", None)
                     await play_item(target_chat, item)
                     await edit(
                         "⚠️ ما فيه مكالمة فيديو، شغلتها صوت 🎵\n\n"
@@ -526,7 +703,7 @@ async def private_handler(client, m):
 
 
 # ================== أوامر الجروب ==================
-def match_cmd(text: str, words) -> "str | None":
+def match_cmd(text: str, words):
     for w in words:
         if text.startswith(w):
             return text[len(w):].strip()
@@ -539,6 +716,13 @@ async def group_commands(client, m):
 
     if text in ("الاوامر", "/start", "اوامر"):
         await m.reply(HELP_TEXT)
+        return
+
+    # روابط مباشرة
+    if text.startswith("http://") or text.startswith("https://"):
+        q = text.split()[0]
+        is_video_url = any(x in q for x in ("youtu.be", "youtube.com"))
+        await handle_play(m, q, video=False)
         return
 
     # فيديو
