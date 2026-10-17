@@ -194,9 +194,7 @@ async def callback_handler(event):
         return
 if data == "back_main":
                 await event.edit(settings["text"], buttons=MAIN_KEYBOARD)
-
-
-    elif data == "btn_1":
+elif data == "btn_1":
         text_1 = (
             "- اوامر التفعيل - التعطيل :\n"
             "↢ تفعيل - تعطيل ( ضافني | الاذكار | الثنائي | افتاري | التسليه | الكت | الترحيب | الردود | الانذار | الايدي | الرابط | الحمايه )"
