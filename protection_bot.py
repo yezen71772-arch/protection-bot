@@ -192,9 +192,9 @@ async def callback_handler(event):
         elif data == "dev_close":
             await event.edit("🔒 تم إغلاق لوحة تحكم المطور.", buttons=MAIN_KEYBOARD)
         return
+if data == "back_main":
+                await event.edit(settings["text"], buttons=MAIN_KEYBOARD)
 
-            if data == "back_main":
-        await event.edit(settings["text"], buttons=MAIN_KEYBOARD)
 
     elif data == "btn_1":
         text_1 = (
