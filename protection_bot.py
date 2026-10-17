@@ -35,6 +35,7 @@ def load_settings():
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
+
     return {
         "text": (
             "اهلا انا بوت اسمي اريا\n\n"
