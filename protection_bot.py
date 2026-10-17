@@ -208,7 +208,8 @@ async def callback_handler(event):
             "↢ تقييد + الوقت | حظر | طرد | كتم | تقييد | الغاء الحظر | الغاء الكتم\n"
             f"قناة التحديثات : {CHANNEL_USER} 🦦"
         )
-            await event.edit(text_1, buttons=BACK_BUTTON)
+                elif data == "btn_1":
+        await event.edit(text_1, buttons=BACK_BUTTON)
     
     elif data == "btn_2":
         text_2 = (
@@ -270,4 +271,3 @@ async def start_all():
 
 if __name__ == '__main__':
     asyncio.get_event_loop().run_until_complete(start_all())
-    
