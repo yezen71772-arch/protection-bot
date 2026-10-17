@@ -1,452 +1,262 @@
-# -*- coding: utf-8 -*-
-"""
-بوت حماية الجروبات - النسخة الخاصة المطورة
-المميزات: حظر/طرد بالكتابة + رتب (مالك أساسي، مالك، مدير، مميز) + ألعاب + أمر ايدي
-التثبيت:  pip install "python-telegram-bot[job-queue]"
-ضع التوكن ثم شغّل:  python protection_bot.py
-"""
+import os
+import asyncio
+import json
+from telethon import TelegramClient, events, Button
+from telethon.sessions import StringSession
+from pytgcalls import PyTgCalls
+from pytgcalls.types import AudioVideoPiped, AudioPiped
+import yt_dlp
 
-import json, os, re, time, random
-from telegram import Update, ChatPermissions
-from telegram.ext import (Application, CommandHandler, MessageHandler,
-                          ContextTypes, filters)
+# ==================== [ إعدادات البيانات ] ====================
 
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")   # يقرأ التوكن من متغير البيئة
+# الأيدي الحسابي الخاص بك (سوكار) لحماية لوحة التحكم لك وحدك
+DEVELOPER_ID = 6913101408  
 
-DEVELOPER_ID = 6913101408   # مطور البوت - صلاحيات عليا في كل الجروبات
+# بيانات الحساب المساعد (Userbot) الخاص بك
+ASSISTANT_API_ID = 37284623
+ASSISTANT_API_HASH = '4e5dd535ba915df2bcdd968d167cd3cb'
 
-SETTINGS_FILE = "settings.json"
+# كود الجلسة (String Session) النصي الطويل الذي أرسلته (تم الدمج بنجاح)
+ASSISTANT_SESSION = '1BJWap1wBuxxZOH7XqLOV4x2l_ulSey8IZ6TkYsUixYI-MydO68HvcpBwMKhcOqYqFMOKuvM7pY1eEu3i_jRrwWzXv__CPb1-LKHZnw5AM4WuadsTmRTHWFBVMPdXIe6EJZK7MEBBbRxEBuQBsTDASfH7hNFlXsdKV7NLjJPtgcDi7fJs8_dmUpUigt_1qh-AnqpT3uhKKOyhheUshBNs3MeaRM7sviGpK0q_a3zJygPgOM-sOugUVnEsgXx6RAvi0UpuQdJATdWkI1KGPUvOKut3VanOL4kJ2rFLOkSlzgWMEFarA5OXlOVYktgpUjiyoHOAUIXFg1MMapDSXFWVy01hAmjzu2U='
 
-DEFAULT_SETTINGS = {
-    "antilink": True,
-    "antiflood": True,
-    "badwords": True,
-    "welcome": True,
-    "flood_limit": 7,
-    "bad_words_list": ["كلب", "حمار", "تافه", "idiot", "stupid"],
-    "welcome_msg": "أهلاً بك {name} في {chat} 🌹 اتبع القوانين واحترم الأعضاء",
-    "ranks": {},   # {user_id: "مالك"}
-}
+# ⚠️ ضع هنا توكن البوت الرسمي الخاص بك المستخرج من @BotFather
+BOT_TOKEN = 'your_bot_token_here'
 
-# رتب البوت ومستوياتها
-RANK_LEVELS = {"مالك اساسي": 4, "مالك": 3, "مدير": 2, "مميز": 1}
-RANK_BADGES = {"مالك اساسي": "👑 مالك أساسي", "مالك": "🎖 مالك",
-               "مدير": "⭐ مدير", "مميز": "🌟 مميز"}
+# ==============================================================
 
-# ---------- حفظ الإعدادات ----------
-def load_all():
-    if os.path.exists(SETTINGS_FILE):
-        with open(SETTINGS_FILE, encoding="utf-8") as f:
+bot = TelegramClient('aria_bot_session', ASSISTANT_API_ID, ASSISTANT_API_HASH).start(bot_token=BOT_TOKEN)
+assistant = TelegramClient(StringSession(ASSISTANT_SESSION), ASSISTANT_API_ID, ASSISTANT_API_HASH)
+call_py = PyTgCalls(assistant)
+
+CHANNEL_USER = "@ARIA1D"
+DB_FILE = "bot_settings.json"
+
+def load_settings():
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    return {}
+    return {
+        "text": (
+            "↢ اهلا انا بوت اسمي اريا\n\n"
+            "↞ موهبتي :\n"
+            "↢ اعلى بوت في مستوى الحمايه للقروبات\n"
+            "↢ مافيه مطورين في البوت غير المطور الاساسي سوكار\n"
+            "↢ يسموني وحش الحمايه 🦦\n\n"
+            "↞ وظيفتي :\n"
+            "↢ حماية القروب وخدمتك وتسليتك انت واعضائك.\n"
+            "↢ تحميل من اليوتيوب والساوند والتيك.\n"
+            "↢ تشغيل المقاطع بالمكالمات : اكتب المكالمه.\n"
+            "↢ كت تويت اسئله جديده ماهي ممله وتتجدد.\n"
+            "↢ قفل الاوامر وتحطها للرتب اللي ودك.\n\n"
+            "انت ارفعني بس مشرفه واعطيني صلاحيات اتفعل تلقائي ، واترك الباقي علي دنا هبسطك ♡"
+        ),
+        "image": "https://telegra.ph",
+        "users": []
+    }
 
-def save_all(data):
-    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def save_settings(data):
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
 
-def get_settings(chat_id):
-    data = load_all()
-    s = {**DEFAULT_SETTINGS, **data.get(str(chat_id), {})}
-    s["ranks"] = s.get("ranks") or {}
-    return s
+settings = load_settings()
+USER_STATES = {}
 
-def set_setting(chat_id, key, value):
-    data = load_all()
-    cid = str(chat_id)
-    data.setdefault(cid, {}).update({key: value, "chat_id": chat_id})
-    save_all(data)
+DEV_KEYBOARD = [
+    [Button.inline("📝 تعديل نص الترحيب", data="dev_edit_text")],
+    [Button.inline("🖼️ تغيير صورة الترحيب", data="dev_edit_img")],
+    [Button.inline("📢 إرسال إذاعة للمستخدمين", data="dev_broadcast")],
+    [Button.inline("❌ إغلاق اللوحة", data="dev_close")]
+]
 
-def set_rank(chat_id, user_id, rank):
-    s = get_settings(chat_id)
-    ranks = s["ranks"]
-    if rank is None:
-        ranks.pop(str(user_id), None)
+MAIN_KEYBOARD = [
+    [Button.inline("1", data="btn_1"), Button.inline("2", data="btn_2")],
+    [Button.inline("3", data="btn_3"), Button.inline("4", data="btn_4")],
+    [Button.inline("5", data="btn_5"), Button.inline("6", data="btn_6")],
+    [Button.url("تحديثات اريا 🦦", f"https://t.me{CHANNEL_USER.strip('@')}")]
+]
+BACK_BUTTON = [[Button.inline("🔙 العودة للقائمة الرئيسية", data="back_main")]]
+
+def get_stream_url(query, video=False):
+    ydl_opts = {
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]' if video else 'bestaudio[ext=m4a]/best',
+        'default_search': 'ytsearch', 'quiet': True, 'noplaylist': True
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(f"ytsearch:{query}", download=False)
+        if 'entries' in info and len(info['entries']) > 0:
+            return info['entries'][0]['url'], info['entries'][0]['title']
+    return None, None
+
+@bot.on(events.NewMessage(pattern='(?i)^/start|^الاوامر'))
+async def send_welcome(event):
+    global settings
+    user_id = event.sender_id
+    if user_id not in settings["users"]:
+        settings["users"].append(user_id)
+        save_settings(settings)
+        
+    if event.is_private and user_id == DEVELOPER_ID:
+        await bot.send_file(
+            event.chat_id, settings["image"],
+            caption=f"👑 أهلاً بك يا مطوري سوكار في لوحة التحكم الخاصة بك:\n\n{settings['text']}",
+            buttons=DEV_KEYBOARD
+        )
     else:
-        ranks[str(user_id)] = rank
-    set_setting(chat_id, "ranks", ranks)
+        await bot.send_file(event.chat_id, settings["image"], caption=settings["text"], buttons=MAIN_KEYBOARD)
 
-async def get_user_rank(update, chat) -> str:
-    """مالك أساسي = منشئ الجروب تلقائياً، ثم الرتب المخزنة"""
-    member = await chat.get_member(update.effective_user.id)
-    if member.status == "creator":
-        return "مالك اساسي"
-    s = get_settings(chat.id)
-    return s["ranks"].get(str(update.effective_user.id), "")
-
-async def get_target_rank(chat, user_id) -> str:
+@bot.on(events.NewMessage(pattern=r'^تشغيل (.+)'))
+async def play_audio_cmd(event):
+    query = event.pattern_match.group(1)
+    status_msg = await event.reply(f"🔍 [المساعد] جاري البحث عن `{query}` وبثها صوتياً...")
     try:
-        member = await chat.get_member(user_id)
-        if member.status == "creator":
-            return "مالك اساسي"
-    except Exception:
-        pass
-    s = get_settings(chat.id)
-    return s["ranks"].get(str(user_id), "")
+        loop = asyncio.get_event_loop()
+        stream_url, title = await loop.run_in_executor(None, lambda: get_stream_url(query, video=False))
+        if not stream_url: return await status_msg.edit("❌ لم أجد نتائج.")
+        await call_py.join_group_call(event.chat_id, AudioPiped(stream_url))
+        await status_msg.edit(f"🎵 بدأ تشغيل الصوت:\n**[{title}]**")
+    except Exception as e:
+        await status_msg.edit("❌ حدث خطأ، تأكد من تشغيل المكالمة وتثبيت FFmpeg.")
 
-async def user_level(update, chat):
-    """مستوى القوة: المطور ثم الرتبة أو أدمن تيليجرام"""
-    if update.effective_user.id == DEVELOPER_ID:
-        return 999
-    member = await chat.get_member(update.effective_user.id)
-    if member.status in ("administrator", "creator"):
-        return 99
-    return RANK_LEVELS.get(await get_user_rank(update, chat), 0)
-
-# ---------- الأوامر ----------
-async def start(update, ctx):
-    await update.message.reply_text(
-        "أنا بوت حماية الجروبات 🛡\n\n"
-        "<b>أوامر الإدارة (بالرد على الشخص):</b>\n"
-        "حظر - حظر الشخص ومنعه من العودة\n"
-        "طرد - طرد الشخص (يقدر يرجع)\n"
-        "الغاء الحظر - فك الحظر\n"
-        "كتم - منع الكتابة مؤقتاً\n"
-        "فك الكتم - السماح بالكتابة\n\n"
-        "<b>الرتب (يرفعها مالك الجروب بالرد):</b>\n"
-        "رفع مالك / رفع مدير / رفع مميز\n"
-        "تنزيل - إزالة الرتبة\n\n"
-        "<b>معلومات:</b>\n"
-        "ايدي - بيانات الحساب\n"
-        "/settings - إعدادات الحماية\n"
-        "antilink/antiflood/badwords/welcome on|off\n\n"
-        "<b>الألعاب:</b>\n"
-        "لعبة - تخمين رقم (1-100)\n"
-        "نرد - زر النرد\n"
-        "حجره ورقه مقص - ضد البوت",
-        parse_mode="HTML")
-
-async def toggle_cmd(update, ctx):
-    if await user_level(update, update.effective_chat) < 3:
-        return await update.message.reply_text("الأمر لمدير الجروب فأعلى ⚠")
-    key = update.message.text.split()[0].lstrip("/").lower()
-    arg = (ctx.args[0].lower() if ctx.args else "")
-    if arg not in ("on", "off"):
-        return await update.message.reply_text("استخدم: /%s on أو off" % key)
-    set_setting(update.effective_chat.id, key, arg == "on")
-    await update.message.reply_text("✅ تم " + ("تشغيل " if arg == "on" else "إيقاف ") + key)
-
-async def dev_cmd(update, ctx):
-    """أمر خاص بالمطور"""
-    if update.effective_user.id != DEVELOPER_ID:
-        return await update.message.reply_text("⚠ هذا الأمر لمطور البوت فقط")
-    data = load_all()
-    groups = [d for d in data.values() if d.get("chat_id")]
-    total_ranks = sum(len(d.get("ranks", {})) for d in groups)
-    await update.message.reply_text(
-        "👨‍💻 <b>لوحة المطور</b>\n"
-        "الجروبات المسجلة: <code>%d</code>\n"
-        "مجموع الرتب الممنوحة: <code>%d</code>\n"
-        "الحالة: يعمل ✅"
-        % (len(groups), total_ranks), parse_mode="HTML")
-
-async def show_settings(update, ctx):
-    s = get_settings(update.effective_chat.id)
-    fmt = lambda b: "مفعّل ✅" if b else "متوقف ❌"
-    await update.message.reply_text(
-        "⚙ إعدادات الجروب:\nحذف الروابط: %s\nالحماية من السبام: %s\n"
-        "الكلمات المسيئة: %s\nالترحيب: %s\nحد الرسائل: %s/10ث"
-        % (fmt(s["antilink"]), fmt(s["antiflood"]), fmt(s["badwords"]),
-           fmt(s["welcome"]), s["flood_limit"]))
-
-# ---------- أوامر النصوص العربية (حظر/طرد/رتب/ايدي) ----------
-async def get_target(update):
-    """الشخص المستهدف: بالرد أو بالمنشن"""
-    msg = update.message
-    if msg.reply_to_message and msg.reply_to_message.from_user:
-        return msg.reply_to_message.from_user
-    if msg.reply_to_message and msg.reply_to_message.forward_from:
-        return msg.reply_to_message.forward_from
-    for ent in (msg.entities or []):
-        if ent.type == "text_mention":
-            return ent.user
-    return None
-
-async def cmd_ban(update, ctx):
-    chat = update.effective_chat
-    if await user_level(update, chat) < 2:
-        return await update.message.reply_text("⚠ هذا الأمر لمدير فأعلى")
-    target = await get_target(update)
-    if not target:
-        return await update.message.reply_text("رد على الشخص اللي تبي تحظره")
-    if target.id == update.effective_user.id:
-        return await update.message.reply_text("ما تقدر تحظر نفسك 😅")
-    if target.id == ctx.bot.id:
-        return await update.message.reply_text("ما أقدر أحظر نفسي 😅")
-    if target.id == DEVELOPER_ID:
-        return await update.message.reply_text("⚠ ما أحد يقدر يحظر مطور البوت!")
+@bot.on(events.NewMessage(pattern=r'^فيديو (.+)'))
+async def play_video_cmd(event):
+    query = event.pattern_match.group(1)
+    status_msg = await event.reply(f"🎬 [المساعد] جاري البحث عن `{query}` وبثها فيديو...")
     try:
-        await chat.ban_member(target.id)
-    except Exception:
-        return await update.message.reply_text("❌ تأكد أن عندي صلاحية حظر الأعضاء")
-    await update.message.reply_text(
-        "⛔ تم حظر %s من الجروب\nبواسطة: %s" % (target.first_name, update.effective_user.first_name))
+        loop = asyncio.get_event_loop()
+        stream_url, title = await loop.run_in_executor(None, lambda: get_stream_url(query, video=True))
+        if not stream_url: return await status_msg.edit("❌ لم أجد نتائج.")
+        await call_py.join_group_call(event.chat_id, AudioVideoPiped(stream_url))
+        await status_msg.edit(f"📺 بدأ بث الفيديو بنجاح:\n**[{title}]**")
+    except Exception as e:
+        await status_msg.edit("❌ حدث خطأ، تأكد من فتح المكالمة المرئية.")
 
-async def cmd_kick(update, ctx):
-    chat = update.effective_chat
-    if await user_level(update, chat) < 1:
-        return await update.message.reply_text("⚠ هذا الأمر للمميز فأعلى")
-    target = await get_target(update)
-    if not target:
-        return await update.message.reply_text("رد على الشخص اللي تبي طرده")
-    if target.id == DEVELOPER_ID:
-        return await update.message.reply_text("⚠ ما أحد يقدر يطرد مطور البوت!")
+@bot.on(events.NewMessage(pattern=r'^(ايقاف|إنهاء|انهاء)'))
+async def stop_call_cmd(event):
     try:
-        await chat.ban_member(target.id)
-        await chat.unban_member(target.id)   # يقدر يرجع
-    except Exception:
-        return await update.message.reply_text("❌ تأكد أن عندي صلاحية حظر الأعضاء")
-    await update.message.reply_text(
-        "👟 تم طرد %s من الجروب (يقدر يرجع)\nبواسطة: %s"
-        % (target.first_name, update.effective_user.first_name))
+        await call_py.leave_group_call(event.chat_id)
+        await event.reply("⏹️ غادر الحساب المساعد المكالمة وتم إيقاف البث.")
+    except Exception: pass
 
-async def cmd_unban(update, ctx):
-    chat = update.effective_chat
-    if await user_level(update, chat) < 2:
-        return await update.message.reply_text("⚠ هذا الأمر لمدير فأعلى")
-    target = await get_target(update)
-    if not target:
-        return await update.message.reply_text("رد على الشخص أو اكتب الغاء الحظر + الايدي الرقمي")
-    args = update.message.text.split()
-    uid = target.id
-    if len(args) > 1 and args[1].lstrip("-").isdigit():
-        uid = int(args[1])
-    try:
-        await chat.unban_member(uid)
-    except Exception:
-        return await update.message.reply_text("❌ ما قدرت أفك الحظر")
-    await update.message.reply_text("✅ تم فك الحظر عن %s" % target.first_name)
+@bot.on(events.NewMessage(func=lambda e: e.is_private and e.sender_id == DEVELOPER_ID))
+async def developer_inputs(event):
+    global settings
+    user_id = event.sender_id
+    state = USER_STATES.get(user_id)
+    if not state: return
 
-async def cmd_mute(update, ctx):
-    chat = update.effective_chat
-    if await user_level(update, chat) < 1:
-        return await update.message.reply_text("⚠ هذا الأمر للمميز فأعلى")
-    target = await get_target(update)
-    if not target:
-        return await update.message.reply_text("رد على الشخص اللي تبي تكتمه")
-    try:
-        await chat.restrict_member(target.id, ChatPermissions.no_permissions())
-    except Exception:
-        return await update.message.reply_text("❌ تأكد أن عندي صلاحية كتم الأعضاء")
-    await update.message.reply_text("🔇 تم كتم %s" % target.first_name)
-
-async def cmd_unmute(update, ctx):
-    chat = update.effective_chat
-    if await user_level(update, chat) < 1:
-        return await update.message.reply_text("⚠ هذا الأمر للمميز فأعلى")
-    target = await get_target(update)
-    if not target:
-        return await update.message.reply_text("رد على الشخص اللي تبي تفك كتمه")
-    try:
-        await chat.restrict_member(target.id, ChatPermissions.all_permissions())
-    except Exception:
-        return await update.message.reply_text("❌ ما قدرت أفك الكتم")
-    await update.message.reply_text("🔊 تم فك الكتم عن %s" % target.first_name)
-
-async def cmd_promote(update, ctx):
-    """رفع مالك / رفع مدير / رفع مميز (بالرد)"""
-    chat = update.effective_chat
-    text = update.message.text.strip()
-    rank = None
-    for r in RANK_LEVELS:
-        if ("رفع " + r) in text:
-            rank = r
-            break
-    if not rank:
-        return
-    if await user_level(update, chat) < 3:
-        return await update.message.reply_text("⚠ رفع الرتب لمالك فأعلى")
-    target = await get_target(update)
-    if not target:
-        return await update.message.reply_text("رد على الشخص اللي تبي ترفعه")
-    if target.id == update.effective_user.id:
-        return await update.message.reply_text("ما تقدر ترفع نفسك 😅")
-    # مالك أساسي فقط يقدر يرفع مالك
-    if rank == "مالك" and await get_user_rank(update, chat) != "مالك اساسي":
-        return await update.message.reply_text("⚠ رفع مالك يحتاج المالك الأساسي")
-    trank = await get_target_rank(chat, target.id)
-    if RANK_LEVELS.get(trank, 0) >= RANK_LEVELS[rank]:
-        return await update.message.reply_text("الشخص رتبته أعلى أصلاً ⚠")
-    set_rank(chat.id, target.id, rank)
-    await update.message.reply_text(
-        "🎉 تم رفع %s إلى رتبة %s\nبواسطة: %s"
-        % (target.first_name, RANK_BADGES[rank], update.effective_user.first_name))
-
-async def cmd_demote(update, ctx):
-    chat = update.effective_chat
-    if await user_level(update, chat) < 3:
-        return await update.message.reply_text("⚠ تنزيل الرتب لمالك فأعلى")
-    target = await get_target(update)
-    if not target:
-        return await update.message.reply_text("رد على الشخص اللي تبي تنزله")
-    if target.id == DEVELOPER_ID:
-        return await update.message.reply_text("⚠ ما أحد يقدر ينزل مطور البوت!")
-    if await get_target_rank(chat, target.id) == "مالك اساسي":
-        return await update.message.reply_text("ما نقدر ننزل المالك الأساسي ⚠")
-    set_rank(chat.id, target.id, None)
-    await update.message.reply_text("📥 تم تنزيل %s من الرتب" % target.first_name)
-
-async def cmd_id(update, ctx):
-    chat = update.effective_chat
-    target = await get_target(update) or update.effective_user
-    if target.id == DEVELOPER_ID:
-        rank, badge = "مطور", "👨‍💻 مطور البوت"
-    else:
-        rank = await get_target_rank(chat, target.id)
-        badge = RANK_BADGES.get(rank, "👤 عضو")
-    uname = "@" + target.username if target.username else "لا يوجد"
-    await update.message.reply_text(
-        "📇 <b>بيانات الحساب</b>\n"
-        "الاسم: %s\n"
-        "المعرف: %s\n"
-        "الايدي: <code>%s</code>\n"
-        "الرتبة: %s\n"
-        "رتبة البوت: %s\n"
-        "ايدي الجروب: <code>%s</code>"
-        % (target.first_name, uname, target.id, badge, badge,
-           chat.id),
-        parse_mode="HTML")
-
-# ---------- الألعاب ----------
-GAMES = {}
-
-async def cmd_game(update, ctx):
-    chat = update.effective_chat
-    num = random.randint(1, 100)
-    GAMES[chat.id] = {"num": num, "by": update.effective_user.first_name}
-    await update.message.reply_text(
-        "🎲 بدأت لعبة تخمين الرقم!\nاخترت رقم بين 1 و 100، من يخمنه أول؟\n"
-        "اكتب رقمك مباشرة، أو (الغاء اللعبة) للإيقاف")
-
-async def cmd_cancel_game(update, ctx):
-    if GAMES.pop(update.effective_chat.id, None):
-        await update.message.reply_text("🛑 تم إيقاف اللعبة")
-
-async def cmd_dice(update, ctx):
-    await update.message.reply_dice()
-
-async def cmd_rps(update, ctx):
-    bot_choice = random.choice(["حجره", "ورقه", "مقص"])
-    emoji = {"حجره": "✊", "ورقه": "✋", "مقص": "✌️"}
-    await update.message.reply_text(
-        "اخترت %s %s\nاكتب (حجره ورقه مقص) مرة ثانية للعب مجدداً"
-        % (bot_choice, emoji[bot_choice]))
-
-# ---------- الحماية ----------
-LINK_RE = re.compile(r"(https?://|t\.me/|www\.|\S+\.(com|net|org|xyz|io|me)\b)", re.I)
-BAN_WORDS = {"حظر", "طرد", "الغاء الحظر", "فك الحظر", "كتم", "فك الكتم",
-             "رفع مالك", "رفع مدير", "رفع مميز", "تنزيل", "ايدي",
-             "لعبة", "نرد", "حجره ورقه مقص", "الغاء اللعبة"}
-
-async def check_message(update: Update, ctx):
-    msg = update.message
-    if not msg or not msg.text or msg.from_user.is_bot:
-        return
-    chat = update.effective_chat
-    text = msg.text.strip()
-    low = text.lower()
-    s = get_settings(chat.id)
-
-    # ----- الأوامر النصية -----
-    if text.startswith("حظر"):
-        return await cmd_ban(update, ctx)
-    if text.startswith("طرد"):
-        return await cmd_kick(update, ctx)
-    if text.startswith("الغاء الحظر") or text.startswith("فك الحظر"):
-        return await cmd_unban(update, ctx)
-    if text.startswith("كتم"):
-        return await cmd_mute(update, ctx)
-    if text.startswith("فك الكتم"):
-        return await cmd_unmute(update, ctx)
-    if text.startswith("رفع ") and any("رفع " + r in text for r in RANK_LEVELS):
-        return await cmd_promote(update, ctx)
-    if text == "تنزيل":
-        return await cmd_demote(update, ctx)
-    if text == "ايدي" or text == "أيدي" or text == "/id" or text.startswith("ايدي "):
-        return await cmd_id(update, ctx)
-    if text == "لعبة" or text == "اللعبة":
-        return await cmd_game(update, ctx)
-    if text == "الغاء اللعبة":
-        return await cmd_cancel_game(update, ctx)
-    if text == "نرد":
-        return await cmd_dice(update, ctx)
-    if low in ("حجره", "ورقه", "مقص", "حجره ورقه مقص"):
-        return await cmd_rps(update, ctx)
-
-    # ----- تخمين رقم اللعبة -----
-    game = GAMES.get(chat.id)
-    if game and text.isdigit() and 1 <= int(text) <= 100:
-        g = int(text)
-        if g == game["num"]:
-            GAMES.pop(chat.id)
-            await msg.reply_text("🎉 مبروك %s! الرقم الصحيح هو %d، فزت باللعبة!"
-                                 % (msg.from_user.first_name, g))
-        elif g < game["num"]:
-            await msg.reply_text("⬆ رقمك أقل، جرب رقم أكبر")
+    if state == "waiting_for_text":
+        settings["text"] = event.text
+        save_settings(settings)
+        USER_STATES.pop(user_id, None)
+        await event.reply("✅ تم تحديث نص الترحيب بنجاح!")
+    elif state == "waiting_for_img":
+        if event.photo:
+            path = await event.download_media(file="welcome_bg.jpg")
+            settings["image"] = path
+            save_settings(settings)
+            USER_STATES.pop(user_id, None)
+            await event.reply("✅ تم تحديث صورة الترحيب بنجاح!")
         else:
-            await msg.reply_text("⬇ رقمك أعلى، جرب رقم أصغر")
-        return
-
-    # ----- الحماية: تجاهل المشرفين وأصحاب الرتب -----
-    if await user_level(update, chat) >= 1:
-        return
-
-    # 1) الروابط
-    if s["antilink"] and LINK_RE.search(text):
-        try:
-            await msg.delete()
-            await chat.restrict_member(msg.from_user.id, ChatPermissions.no_permissions())
-            await chat.send_message("🚫 ممنوع نشر الروابط %s - تم كتمه"
-                                    % msg.from_user.first_name)
-        except Exception:
-            pass
-        return
-
-    # 2) الكلمات المسيئة
-    if s["badwords"] and any(w in low for w in s["bad_words_list"]):
-        try:
-            await msg.delete()
-        except Exception:
-            pass
-        return
-
-    # 3) السبام
-    if s["antiflood"]:
-        uid = (chat.id, msg.from_user.id)
-        now = time.time()
-        hist = ctx.bot_data.setdefault("flood", {}).setdefault(uid, [])
-        hist[:] = [t for t in hist if now - t < 10]
-        hist.append(now)
-        if len(hist) > s["flood_limit"]:
-            hist.clear()
+            await event.reply("❌ يرجى إرسال صورة صالحة.")
+    elif state == "waiting_for_broadcast":
+        USER_STATES.pop(user_id, None)
+        await event.reply("📢 جاري بدء الإذاعة...")
+        count = 0
+        for u_id in settings["users"]:
             try:
-                await chat.restrict_member(msg.from_user.id, ChatPermissions.no_permissions())
-                await chat.send_message("🔇 تم كتم %s بسبب التكرار" % msg.from_user.first_name)
-            except Exception:
-                pass
+                await bot.send_message(u_id, event.message)
+                count += 1
+                await asyncio.sleep(0.2)
+            except Exception: pass
+        await event.reply(f"🎯 تم إرسال الإذاعة إلى {count} مستخدم.")
 
-# ---------- الترحيب ----------
-async def welcome(update: Update, ctx):
-    chat = update.effective_chat
-    s = get_settings(chat.id)
-    if not s["welcome"]:
+@bot.on(events.CallbackQuery)
+async def callback_handler(event):
+    global settings
+    data = event.data.decode('utf-8')
+    user_id = event.sender_id
+    
+    if data.startswith("dev_") and user_id == DEVELOPER_ID:
+        if data == "dev_edit_text":
+            USER_STATES[user_id] = "waiting_for_text"
+            await event.respond("💬 أرسل الآن نص الترحيب الجديد كاملاً:")
+        elif data == "dev_edit_img":
+            USER_STATES[user_id] = "waiting_for_img"
+            await event.respond("🖼️ قم بإرسال الصورة الجديدة الآن:")
+        elif data == "dev_broadcast":
+            USER_STATES[user_id] = "waiting_for_broadcast"
+            await event.respond("📢 أرسل الرسالة التي تريد إذاعتها للكل:")
+        elif data == "dev_close":
+            await event.edit("🔒 تم إغلاق لوحة تحكم المطور.", buttons=MAIN_KEYBOARD)
         return
-    for u in update.message.new_chat_members:
-        if u.is_bot:
-            continue
-        await chat.send_message(s["welcome_msg"].format(name=u.first_name, chat=chat.title))
 
-# ---------- التشغيل ----------
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("settings", show_settings))
-    app.add_handler(CommandHandler("dev", dev_cmd))
-    for cmd in ("antilink", "antiflood", "badwords", "welcome"):
-        app.add_handler(CommandHandler(cmd, toggle_cmd))
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
-    app.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.COMMAND, check_message))
-    print("البوت يعمل الآن...")
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
+    if data == "back_main":
+        await event.edit(settings["text"], buttons=MAIN_KEYBOARD)
+    elif data == "btn_1":
+        text_1 = (
+            "↢ أهلاً فيك يا حلو ♡\n• قائمة اوامر Admin\n\n"
+            "- اوامر الرفع والتنزيل :\n"
+            "↢ رفع - تنزيل مالك اساسي | مالك | مشرف | منشئ | مدير | ادمن | مميز\n"
+            "↢ تنزيل الكل - لازاله جميع الرتب اعلاه\n\n"
+            "- اوامر المسح :\n"
+            "↢ مسح الكل | المنشئين | المدراء | المالكين | الادمنيه | المميزين | المحظورين | المكتومين\n"
+            "↢ مسح قائمة المنع | الردود | الاوامر المضافه | مسح + عدد | مسح بالرد | مسح الايدي\n\n"
+            "- اوامر الطرد والحظر :\n"
+            "↢ تقييد + الوقت | حظر | طرد | كتم | تقييد | الغاء الحظر | الغاء الكتم\n"
+            f"قناة التحديثات : {CHANNEL_USER} 🦦"
+        )
+        await event.edit(text_1, buttons=BACK_BUTTON)
+    elif data == "btn_2":
+        text_2 = (
+            "- قائمة الاعدادات :\n"
+            "• اكتب في قروبك كذا ↓\n"
+            "↢ الرابط | المالكين | المالكين الاساسين | المنشئين | الادمنيه | المدراء | المميزين | المحظورين | القوانين | معلوماتي | الحمايه | الاعدادت\n\n"
+            "- اوامر وضع الاعدادات :\n"
+            "↢ مسح الرابط | انشاء رابط | ضع الترحيب | ضع قوانين | ضـع رابط | اضف امر | تعيين الايدي\n"
+            f"قناة تحديثات اريا : {CHANNEL_USER} 🦦"
+        )
+        await event.edit(text_2, buttons=BACK_BUTTON)
+    elif data == "btn_3":
+        text_3 = (
+            "- قائمة القفل - التعطيل :\n\n"
+            "اولا : اوامر القفل والفتح :\n"
+            "↢ قفل - فتح ( جمثون | السب | الايرانيه | الكتابه | التعديل | الفيديو | الصور | الملصقات | المتحركه | الروابط | التاك | البوتات | المعرفات | التكرار | التوجيه )\n\n"
+            "ثانيا : اوامر التفعيل - التعطيل :\n"
+"↢ تفعيل - تعطيل ( ضافني | الاذكار | الثنائي | افتاري | التسليه | الكت | الترحيب | الردود | الانذار | الايدي | الرابط | الحمايه )"
+)
+await event.edit(text_3, buttons=BACK_BUTTON)
+elif data == "btn_4":
+text_4 = (
+"• اهلا بك عزيزي - اوامر التسلية :\n"
+"━━━━━━━━━━━━\n"
+"• رفع - تنزيل : ( هطف | بثر | حمار | كلب | عتوي | لحجي | خروف | خفيف )\n"
+"• رفع بقلبي : تنزيل من قلبي\n"
+"• طلاق - زواج | زوجي - زوجتي | تتزوجني\n"
+"• اكتموه (تصويت)"
+)
+await event.edit(text_4, buttons=BACK_BUTTON)
+elif data == "btn_5":
+text_5 = (
+"• اهلا بك عزيزي - اوامر الخدميه :\n"
+"━━━━━━━━━━━━\n"
+"• نسبه الحب | نسبه الغباء | تحبه - بالرد\n"
+"• ارسل + الكلام + اليوزر زاجل\n"
+"• قوقل + كلام البحث | تطبيق + الاسم\n"
+"• قران | اذكار | شعر ، قصائد | اقتباسات | thred\n"
+"• اطربني | اغاني | ميمز | ايدت\n"
+"• افتارات (بنات ، عيال ، تطقيم ، انمي)\n"
+"━━━━━━━━━━━━\n"
+"التحميل :\n"
+"• ساوند + الرابط | تيك + الرابط | تويتر + الرابط"
+)
+await event.edit(text_5, buttons=BACK_BUTTON)
+elif data == "btn_6":
+await event.answer("هذا القسم فارغ حالياً.. ⚙️", alert=True)
+async def start_all():
+await bot.start()
+await assistant.start()
+await call_py.start()
+print("🤖 البوت يعمل بنجاح...")
+await bot.run_until_disconnected()
+if name == 'main':
+asyncio.get_event_loop().run_until_complete(start_all())
