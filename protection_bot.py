@@ -193,10 +193,11 @@ async def callback_handler(event):
             await event.edit("🔒 تم إغلاق لوحة تحكم المطور.", buttons=MAIN_KEYBOARD)
         return
 
-    if data == "back_main":
+    if data == "    if data == "back_main":
         await event.edit(settings["text"], buttons=MAIN_KEYBOARD)
+    
     elif data == "btn_1":
-                text_1 = (
+        text_1 = (
             "- اوامر التفعيل - التعطيل :\n"
             "↢ تفعيل - تعطيل ( ضافني | الاذكار | الثنائي | افتاري | التسليه | الكت | الترحيب | الردود | الانذار | الايدي | الرابط | الحمايه )"
         )
@@ -242,7 +243,7 @@ async def callback_handler(event):
             "• ارسل + الكلام + اليوزر زاجل\n"
             "• قوقل + كلام البحث | تطبيق + الاسم\n"
             "• قران | اذكار | شعر ، قصائد | اقتباسات | thred\n"
-            "• اطربني | اغاني | mيمز | ايدت\n"
+            "• اطربني | اغاني | ميمز | ايدت\n"
             "• افتارات (بنات ، عيال ، تطقيم ، انمي)\n"
             "━━━━━━━━━━━━\n"
             "التحميل :\n"
@@ -252,6 +253,17 @@ async def callback_handler(event):
     
     elif data == "btn_6":
         await event.answer("هذا القسم فارغ حالياً.. ⚙️", alert=True)
+
+async def start_all():
+    await bot.start()
+    # await assistant.start()
+    # await call_py.start()
+    print("🤖 البوت يعمل بنجاح...")
+    await bot.run_until_disconnected()
+
+if __name__ == '__main__':
+    asyncio.get_event_loop().run_until_complete(start_all())
+
 
 async def start_all():
     await bot.start()
