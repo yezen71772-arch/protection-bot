@@ -224,39 +224,44 @@ async def callback_handler(event):
             "ثانيا : اوامر التفعيل - التعطيل :\n"
 "↢ تفعيل - تعطيل ( ضافني | الاذكار | الثنائي | افتاري | التسليه | الكت | الترحيب | الردود | الانذار | الايدي | الرابط | الحمايه )"
 )
-await event.edit(text_3, buttons=BACK_BUTTON)
+    await event.edit(text_3, buttons=BACK_BUTTON)
+    
 elif data == "btn_4":
-text_4 = (
-"• اهلا بك عزيزي - اوامر التسلية :\n"
-"━━━━━━━━━━━━\n"
-"• رفع - تنزيل : ( هطف | بثر | حمار | كلب | عتوي | لحجي | خروف | خفيف )\n"
-"• رفع بقلبي : تنزيل من قلبي\n"
-"• طلاق - زواج | زوجي - زوجتي | تتزوجني\n"
-"• اكتموه (تصويت)"
-)
-await event.edit(text_4, buttons=BACK_BUTTON)
+    text_4 = (
+        "• اهلا بك عزيزي - اوامر التسلية :\n"
+        "━━━━━━━━━━━━\n"
+        "• رفع - تنزيل : ( هطف | بثر | حمار | كلب | عتوي | لحجي | خروف | خفيف )\n"
+        "• رفع بقلبي : تنزيل من قلبي\n"
+        "• طلاق - زواج | زوجي - زوجتي | تتزوجني\n"
+        "• اكتموه (تصويت)"
+    )
+    await event.edit(text_4, buttons=BACK_BUTTON)
+    
 elif data == "btn_5":
-text_5 = (
-"• اهلا بك عزيزي - اوامر الخدميه :\n"
-"━━━━━━━━━━━━\n"
-"• نسبه الحب | نسبه الغباء | تحبه - بالرد\n"
-"• ارسل + الكلام + اليوزر زاجل\n"
-"• قوقل + كلام البحث | تطبيق + الاسم\n"
-"• قران | اذكار | شعر ، قصائد | اقتباسات | thred\n"
-"• اطربني | اغاني | ميمز | ايدت\n"
-"• افتارات (بنات ، عيال ، تطقيم ، انمي)\n"
-"━━━━━━━━━━━━\n"
-"التحميل :\n"
-"• ساوند + الرابط | تيك + الرابط | تويتر + الرابط"
-)
-await event.edit(text_5, buttons=BACK_BUTTON)
+    text_5 = (
+        "• اهلا بك عزيزي - اوامر الخدميه :\n"
+        "━━━━━━━━━━━━\n"
+        "• نسبه الحب | نسبه الغباء | تحبه - بالرد\n"
+        "• ارسل + الكلام + اليوزر زاجل\n"
+        "• قوقل + كلام البحث | تطبيق + الاسم\n"
+        "• قران | اذكار | شعر ، قصائد | اقتباسات | thred\n"
+        "• اطربني | اغاني | ميمز | ايدت\n"
+        "• افتارات (بنات ، عيال ، تطقيم ، انمي)\n"
+        "━━━━━━━━━━━━\n"
+        "التحميل :\n"
+        "• ساوند + الرابط | تيك + الرابط | تويتر + الرابط"
+    )
+    await event.edit(text_5, buttons=BACK_BUTTON)
+    
 elif data == "btn_6":
-await event.answer("هذا القسم فارغ حالياً.. ⚙️", alert=True)
+    await event.answer("هذا القسم فارغ حالياً.. ⚙️", alert=True)
+
 async def start_all():
-await bot.start()
-await assistant.start()
-await call_py.start()
-print("🤖 البوت يعمل بنجاح...")
-await bot.run_until_disconnected()
-if name == 'main':
-asyncio.get_event_loop().run_until_complete(start_all())
+    await bot.start()
+    await assistant.start()
+    await call_py.start()
+    print("🤖 البوت يعمل بنجاح...")
+    await bot.run_until_disconnected()
+
+if __name__ == '__main__':
+    asyncio.get_event_loop().run_until_complete(start_all())
