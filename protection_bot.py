@@ -263,10 +263,7 @@ async def callback_handler(event):
 
 async def start_all():
     await bot.start()
-    await assistant.start()
-    await call_py.start()
+    # await assistant.start()
+    # await call_py.start()
     print("🤖 البوت يعمل بنجاح...")
     await bot.run_until_disconnected()
-
-if __name__ == '__main__':
-    asyncio.get_event_loop().run_until_complete(start_all())
