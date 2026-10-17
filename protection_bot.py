@@ -207,8 +207,7 @@ async def callback_handler(event):
             "- اوامر الطرد والحظر :\n"
             "↢ تقييد + الوقت | حظر | طرد | كتم | تقييد | الغاء الحظر | الغاء الكتم\n"
             f"قناة التحديثات : {CHANNEL_USER} 🦦"
-        )
-                elif data == "btn_1":
+            elif data == "btn_1":
         await event.edit(text_1, buttons=BACK_BUTTON)
     
     elif data == "btn_2":
