@@ -1,503 +1,452 @@
-import json
-import logging
-import os
-import uuid
-import yt_dlp
-from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
-from pytgcalls import PyTgCalls
-from pytgcalls import filters as fl
-from pytgcalls.types import AudioQuality, MediaStream, StreamEnded, VideoQuality
+# -*- coding: utf-8 -*-
+"""
+بوت حماية الجروبات - النسخة الخاصة المطورة
+المميزات: حظر/طرد بالكتابة + رتب (مالك أساسي، مالك، مدير، مميز) + ألعاب + أمر ايدي
+التثبيت:  pip install "python-telegram-bot[job-queue]"
+ضع التوكن ثم شغّل:  python protection_bot.py
+"""
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-log = logging.getLogger("ARIA-MUSIC")
+import json, os, re, time, random
+from telegram import Update, ChatPermissions
+from telegram.ext import (Application, CommandHandler, MessageHandler,
+                          ContextTypes, filters)
 
-# ================== الإعدادات ==================
-API_ID = int(os.environ.get("API_ID", "0") or 0)
-API_HASH = os.environ.get("API_HASH", "")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-DEV_ID = 6913101408  # المطور: كل الإعدادات من الخاص
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")   # يقرأ التوكن من متغير البيئة
 
-if not (API_ID and API_HASH and BOT_TOKEN):
-    raise SystemExit("ناقص متغيرات البيئة: API_ID, API_HASH, BOT_TOKEN")
+DEVELOPER_ID = 6913101408   # مطور البوت - صلاحيات عليا في كل الجروبات
 
-bot = Client("music_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=8)
-call_py = PyTgCalls(bot)
+SETTINGS_FILE = "settings.json"
 
-QUEUE = {}        # chat_id -> [item, ...]
-PLAYING = {}      # chat_id -> item الشغال حاليا
-SEARCH_CACHE = {} # مفتاح البحث -> بيانات الأغنية
-
-AUDIO_WORDS = ("تشغيل", "شغل")
-VIDEO_WORDS = ("فيديو", "فيد")
-SEARCH_WORDS = ("يوت", "بحث")
-
-CONFIG_FILE = "config.json"
-
-DEFAULT_CONFIG = {
-    "thumb": None,        # file_id لصورة التشغيل
-    "reply_photo": True,   # الرد بصورة أو نص فقط
-    "audio_q": "high",    # high / medium / low
-    "video_q": "720",     # 720 / 480 / 360
+DEFAULT_SETTINGS = {
+    "antilink": True,
+    "antiflood": True,
+    "badwords": True,
+    "welcome": True,
+    "flood_limit": 7,
+    "bad_words_list": ["كلب", "حمار", "تافه", "idiot", "stupid"],
+    "welcome_msg": "أهلاً بك {name} في {chat} 🌹 اتبع القوانين واحترم الأعضاء",
+    "ranks": {},   # {user_id: "مالك"}
 }
 
-CONFIG = dict(DEFAULT_CONFIG)
+# رتب البوت ومستوياتها
+RANK_LEVELS = {"مالك اساسي": 4, "مالك": 3, "مدير": 2, "مميز": 1}
+RANK_BADGES = {"مالك اساسي": "👑 مالك أساسي", "مالك": "🎖 مالك",
+               "مدير": "⭐ مدير", "مميز": "🌟 مميز"}
 
-try:
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE) as f:
-            CONFIG.update(json.load(f))
-except Exception:
-    pass
+# ---------- حفظ الإعدادات ----------
+def load_all():
+    if os.path.exists(SETTINGS_FILE):
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    return {}
 
+def save_all(data):
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
-def save_config():
-    try:
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(CONFIG, f)
-    except Exception as e:
-        log.error(f"config save error: {e}")
+def get_settings(chat_id):
+    data = load_all()
+    s = {**DEFAULT_SETTINGS, **data.get(str(chat_id), {})}
+    s["ranks"] = s.get("ranks") or {}
+    return s
 
+def set_setting(chat_id, key, value):
+    data = load_all()
+    cid = str(chat_id)
+    data.setdefault(cid, {}).update({key: value, "chat_id": chat_id})
+    save_all(data)
 
-AUDIO_QUALITY_MAP = {
-    "high": AudioQuality.HIGH,
-    "medium": getattr(AudioQuality, "MEDIUM", AudioQuality.HIGH),
-    "low": getattr(AudioQuality, "LOW", AudioQuality.HIGH),
-}
-VIDEO_QUALITY_MAP = {
-    "720": VideoQuality.HD_720p,
-    "480": getattr(VideoQuality, "SD_480p", VideoQuality.HD_720p),
-    "360": getattr(VideoQuality, "SD_360p", VideoQuality.HD_720p),
-}
-AUDIO_Q_LABEL = {"high": "عالية", "medium": "متوسطة", "low": "منخفضة"}
-
-YTDLP_OPTS = {
-    "quiet": True,
-    "no_warnings": True,
-    "noplaylist": True,
-    "skip_download": True,
-    "nocheckcertificate": True,
-    "geo_bypass": True,
-}
-
-HELP_TEXT = (
-    "🎵 <b>بوت موسيقى ARIA</b>\n\n"
-    "• <code>شغل</code> + اسم الأغنية ← تشغيل صوت 🎵\n"
-    "• <code>فيد</code> + اسم الأغنية ← تشغيل فيديو 🎬\n"
-    "• <code>يوت</code> + اسم الأغنية ← اختيار فيديو أو صوت بأزرار\n"
-    "• <code>تخطي</code> ← الأغنية التالية ⏭\n"
-    "• <code>اسكت</code> ← إيقاف مؤقت ⏸\n"
-    "• <code>كمل</code> ← يكمل من وين توقف ▶️\n"
-    "• <code>ايقاف</code> ← إيقاف كل الأغاني والخروج ⏹\n\n"
-    "⚠️ لازم تكون المكالمة الصوتية مفتوحة والبوت أدمن"
-)
-
-
-# ================== بحث يوتيوب ==================
-def search_track(query: str) -> dict:
-    q = query if query.startswith("http") else f"ytsearch1:{query}"
-    with yt_dlp.YoutubeDL(YTDLP_OPTS) as ydl:
-        info = ydl.extract_info(q, download=False)
-    if info and "entries" in info:
-        entries = [e for e in info["entries"] if e]
-        if not entries:
-            raise ValueError("no results")
-        info = entries[0]
-    url = info.get("webpage_url") or info.get("original_url") or info.get("url")
-    if not url:
-        raise ValueError("no url")
-    return {
-        "title": info.get("title") or "غير معروف",
-        "url": url,
-        "dur": int(info.get("duration") or 0),
-        "thumb": info.get("thumbnail"),
-    }
-
-
-def fmt_dur(seconds: int) -> str:
-    m, s = divmod(seconds, 60)
-    return f"{m}:{s:02d}"
-
-
-# ================== ردود أنيقة (مثل البوتات المشهورة) ==================
-async def send_now(chat_id: int, item: dict, video: bool):
-    cap = (
-        f"{'🎬 فيديو' if video else '🎵 صوت'} <b>• تبدا تشتغل الآن</b>\n\n"
-        f"📀 <b>العنوان:</b> {item['title']}\n"
-        f"⏱ <b>المدة:</b> {fmt_dur(item['dur']) if item['dur'] else 'غير معروفة'}\n"
-        f"👤 <b>طلبها:</b> {item.get('by') or '-'}\n"
-        f"🎧 <b>جودة الصوت:</b> {AUDIO_Q_LABEL.get(CONFIG['audio_q'], 'عالية')}"
-    )
-    await _send_media(chat_id, cap, item)
-
-
-async def send_queued(chat_id: int, item: dict, pos: int):
-    cap = (
-        f"📝 <b>انضافت للقائمة</b> • الموقع {pos}\n\n"
-        f"📀 <b>العنوان:</b> {item['title']}\n"
-        f"⏱ <b>المدة:</b> {fmt_dur(item['dur']) if item['dur'] else 'غير معروفة'}\n"
-        f"👤 <b>طلبها:</b> {item.get('by') or '-'}"
-    )
-    await _send_media(chat_id, cap, item)
-
-
-async def _send_media(chat_id: int, cap: str, item: dict):
-    if not CONFIG.get("reply_photo", True):
-        await bot.send_message(chat_id, cap)
-        return
-    thumb = CONFIG.get("thumb")
-    if thumb:
-        try:
-            await bot.send_photo(chat_id, thumb, caption=cap)
-            return
-        except Exception:
-            pass
-    if item.get("thumb"):
-        try:
-            await bot.send_photo(chat_id, item["thumb"], caption=cap)
-            return
-        except Exception:
-            pass
-    await bot.send_message(chat_id, cap)
-
-
-# ================== التشغيل ==================
-def build_stream(item: dict) -> MediaStream:
-    aq = AUDIO_QUALITY_MAP.get(CONFIG.get("audio_q"), AudioQuality.HIGH)
-    if item.get("video"):
-        vq = VIDEO_QUALITY_MAP.get(CONFIG.get("video_q"), VideoQuality.HD_720p)
-        return MediaStream(item["url"], aq, vq)
-    return MediaStream(item["url"], aq)
-
-
-async def play_item(chat_id: int, item: dict):
-    await call_py.play(chat_id, build_stream(item))
-    PLAYING[chat_id] = item
-
-
-async def play_next(chat_id: int):
-    q = QUEUE.get(chat_id)
-    if q:
-        item = q.pop(0)
-        try:
-            await play_item(chat_id, item)
-            await send_now(chat_id, item, item.get("video", False))
-        except Exception as e:
-            log.error(f"play error: {e}")
-            await bot.send_message(chat_id, "⚠️ تعذر تشغيل هذا المقطع، جاري تجربة التالي...")
-            await play_next(chat_id)
+def set_rank(chat_id, user_id, rank):
+    s = get_settings(chat_id)
+    ranks = s["ranks"]
+    if rank is None:
+        ranks.pop(str(user_id), None)
     else:
-        PLAYING.pop(chat_id, None)
-        try:
-            await call_py.leave_call(chat_id)
-        except Exception:
-            pass
-        await bot.send_message(chat_id, "✅ القائمة خلصت، طلعت من المكالمة 👋")
+        ranks[str(user_id)] = rank
+    set_setting(chat_id, "ranks", ranks)
 
+async def get_user_rank(update, chat) -> str:
+    """مالك أساسي = منشئ الجروب تلقائياً، ثم الرتب المخزنة"""
+    member = await chat.get_member(update.effective_user.id)
+    if member.status == "creator":
+        return "مالك اساسي"
+    s = get_settings(chat.id)
+    return s["ranks"].get(str(update.effective_user.id), "")
 
-async def start_playing(m: Message, item: dict, video: bool, edit=None):
-    chat_id = m.chat.id
-    if chat_id in PLAYING:
-        QUEUE.setdefault(chat_id, []).append(item)
-        pos = len(QUEUE[chat_id])
-        if edit:
-            await edit(f"📝 <b>انضافت للقائمة</b> • الموقع {pos}\n\n📀 {item['title']}")
-        else:
-            await send_queued(chat_id, item, pos)
-        return
+async def get_target_rank(chat, user_id) -> str:
     try:
-        await play_item(chat_id, item)
-    except Exception as e:
-        if video:
-            log.error(f"video play error: {e}")
-            try:
-                item["video"] = False
-                await play_item(chat_id, item)
-                msg = (
-                    "⚠️ ما قدرت أبث فيديو (لازم مكالمة فيديو مفتوحة بالمجموعة)، شغلتها صوت 🎵\n\n"
-                    f"📀 <b>العنوان:</b> {item['title']}"
-                )
-                if edit:
-                    await edit(msg)
-                else:
-                    await m.reply(msg)
-                return
-            except Exception:
-                pass
-        err = (
-            "❌ ما قدرت أدخل المكالمة.\n"
-            "تأكد إن: المكالمة الصوتية مفتوحة + البوت أدمن بالمجموعة"
-        )
-        if edit:
-            await edit(err)
-        else:
-            await m.reply(err)
-        return
-    if edit:
-        await edit(
-            f"{'🎬 فيديو' if item['video'] else '🎵 صوت'} <b>• تبدا تشتغل الآن</b>\n\n"
-            f"📀 <b>العنوان:</b> {item['title']}\n"
-            f"👤 <b>طلبها:</b> {item.get('by') or '-'}"
-        )
-    else:
-        await send_now(chat_id, item, item["video"])
-
-
-async def handle_play(m: Message, query: str, video: bool):
-    try:
-        item = search_track(query)
-    except Exception as e:
-        log.error(f"search error: {e}")
-        await m.reply("❌ ما لقيت الأغنية، جرّب اسم ثاني")
-        return
-    item["video"] = video
-    item["by"] = (m.from_user.first_name if m.from_user else "") or ""
-    await start_playing(m, item, video)
-
-
-async def handle_search_buttons(m: Message, query: str):
-    try:
-        item = search_track(query)
+        member = await chat.get_member(user_id)
+        if member.status == "creator":
+            return "مالك اساسي"
     except Exception:
-        await m.reply("❌ ما لقيت شي بهالاسم، جرّب اسم ثاني")
-        return
-    key = uuid.uuid4().hex[:10]
-    SEARCH_CACHE[key] = {"item": item, "chat_id": m.chat.id}
-    dur = fmt_dur(item["dur"]) if item["dur"] else ""
-    markup = InlineKeyboardMarkup(
-        [[
-            InlineKeyboardButton("🎬 فيديو", callback_data=f"pl:{key}:v"),
-            InlineKeyboardButton("🎵 صوت", callback_data=f"pl:{key}:a"),
-        ]]
-    )
-    await m.reply(
-        f"🔎 <b>{item['title']}</b> {f'({dur})' if dur else ''}\nاختار طريقة التشغيل:",
-        reply_markup=markup,
-    )
+        pass
+    s = get_settings(chat.id)
+    return s["ranks"].get(str(user_id), "")
 
+async def user_level(update, chat):
+    """مستوى القوة: المطور ثم الرتبة أو أدمن تيليجرام"""
+    if update.effective_user.id == DEVELOPER_ID:
+        return 999
+    member = await chat.get_member(update.effective_user.id)
+    if member.status in ("administrator", "creator"):
+        return 99
+    return RANK_LEVELS.get(await get_user_rank(update, chat), 0)
 
-# ================== أزرار اختيار فيديو/صوت ==================
-@bot.on_callback_query()
-async def on_button(client: Client, cq):
-    data = cq.data or ""
-    if data.startswith("pl:"):
-        _, key, mode = data.split(":")
-        rec = SEARCH_CACHE.get(key)
-        if not rec:
-            await cq.answer("انتهت صلاحية البحث، ابحث من جديد", show_alert=True)
-            return
-        await cq.answer()
-        chat_id = rec["chat_id"]
-        item = rec["item"]
-        item["video"] = mode == "v"
-        item["by"] = (cq.from_user.first_name if cq.from_user else "") or ""
-        SEARCH_CACHE.pop(key, None)
+# ---------- الأوامر ----------
+async def start(update, ctx):
+    await update.message.reply_text(
+        "أنا بوت حماية الجروبات 🛡\n\n"
+        "<b>أوامر الإدارة (بالرد على الشخص):</b>\n"
+        "حظر - حظر الشخص ومنعه من العودة\n"
+        "طرد - طرد الشخص (يقدر يرجع)\n"
+        "الغاء الحظر - فك الحظر\n"
+        "كتم - منع الكتابة مؤقتاً\n"
+        "فك الكتم - السماح بالكتابة\n\n"
+        "<b>الرتب (يرفعها مالك الجروب بالرد):</b>\n"
+        "رفع مالك / رفع مدير / رفع مميز\n"
+        "تنزيل - إزالة الرتبة\n\n"
+        "<b>معلومات:</b>\n"
+        "ايدي - بيانات الحساب\n"
+        "/settings - إعدادات الحماية\n"
+        "antilink/antiflood/badwords/welcome on|off\n\n"
+        "<b>الألعاب:</b>\n"
+        "لعبة - تخمين رقم (1-100)\n"
+        "نرد - زر النرد\n"
+        "حجره ورقه مقص - ضد البوت",
+        parse_mode="HTML")
 
-        async def edit(txt):
-            try:
-                await cq.edit_message_text(txt)
-            except Exception:
-                pass
+async def toggle_cmd(update, ctx):
+    if await user_level(update, update.effective_chat) < 3:
+        return await update.message.reply_text("الأمر لمدير الجروب فأعلى ⚠")
+    key = update.message.text.split()[0].lstrip("/").lower()
+    arg = (ctx.args[0].lower() if ctx.args else "")
+    if arg not in ("on", "off"):
+        return await update.message.reply_text("استخدم: /%s on أو off" % key)
+    set_setting(update.effective_chat.id, key, arg == "on")
+    await update.message.reply_text("✅ تم " + ("تشغيل " if arg == "on" else "إيقاف ") + key)
 
-        if chat_id in PLAYING:
-            QUEUE.setdefault(chat_id, []).append(item)
-            pos = len(QUEUE[chat_id])
-            await edit(f"📝 <b>انضافت للقائمة</b> • الموقع {pos}\n\n📀 {item['title']}")
-            return
-        try:
-            await play_item(chat_id, item)
-        except Exception as e:
-            if item["video"]:
-                log.error(f"video play error: {e}")
-                try:
-                    item["video"] = False
-                    await play_item(chat_id, item)
-                    await edit(
-                        "⚠️ ما فيه مكالمة فيديو، شغلتها صوت 🎵\n\n"
-                        f"📀 <b>العنوان:</b> {item['title']}"
-                    )
-                    return
-                except Exception:
-                    pass
-            await edit("❌ ما قدرت أدخل المكالمة.\nتأكد إن المكالمة مفتوحة والبوت أدمن")
-            return
-        await edit(
-            f"{'🎬 فيديو' if item['video'] else '🎵 صوت'} <b>• تبدا تشتغل الآن</b>\n\n"
-            f"📀 <b>العنوان:</b> {item['title']}\n"
-            f"👤 <b>طلبها:</b> {item.get('by') or '-'}"
-        )
-    elif data.startswith("st:"):
-        if cq.from_user.id != DEV_ID:
-            await cq.answer("الإعدادات للمطور فقط 🔒", show_alert=True)
-            return
-        await cq.answer()
-        action = data[3:]
-        if action == "photo":
-            CONFIG["reply_photo"] = not CONFIG.get("reply_photo", True)
-        elif action == "delthumb":
-            CONFIG["thumb"] = None
-        elif action == "audio":
-            order = ["high", "medium", "low"]
-            i = order.index(CONFIG.get("audio_q", "high"))
-            CONFIG["audio_q"] = order[(i + 1) % 3]
-        elif action == "video":
-            order = ["720", "480", "360"]
-            i = order.index(CONFIG.get("video_q", "720"))
-            CONFIG["video_q"] = order[(i + 1) % 3]
-        save_config()
-        await cq.edit_message_text(settings_text(), reply_markup=settings_markup())
+async def dev_cmd(update, ctx):
+    """أمر خاص بالمطور"""
+    if update.effective_user.id != DEVELOPER_ID:
+        return await update.message.reply_text("⚠ هذا الأمر لمطور البوت فقط")
+    data = load_all()
+    groups = [d for d in data.values() if d.get("chat_id")]
+    total_ranks = sum(len(d.get("ranks", {})) for d in groups)
+    await update.message.reply_text(
+        "👨‍💻 <b>لوحة المطور</b>\n"
+        "الجروبات المسجلة: <code>%d</code>\n"
+        "مجموع الرتب الممنوحة: <code>%d</code>\n"
+        "الحالة: يعمل ✅"
+        % (len(groups), total_ranks), parse_mode="HTML")
 
+async def show_settings(update, ctx):
+    s = get_settings(update.effective_chat.id)
+    fmt = lambda b: "مفعّل ✅" if b else "متوقف ❌"
+    await update.message.reply_text(
+        "⚙ إعدادات الجروب:\nحذف الروابط: %s\nالحماية من السبام: %s\n"
+        "الكلمات المسيئة: %s\nالترحيب: %s\nحد الرسائل: %s/10ث"
+        % (fmt(s["antilink"]), fmt(s["antiflood"]), fmt(s["badwords"]),
+           fmt(s["welcome"]), s["flood_limit"]))
 
-def settings_text() -> str:
-    photo_state = "مفعل ✅" if CONFIG.get("reply_photo", True) else "معطل ❌"
-    return (
-        "⚙️ <b>إعدادات البوت</b> (خاصة بالمطور)\n\n"
-        f"🖼 <b>صورة التشغيل:</b> {'موجودة ✅' if CONFIG.get('thumb') else 'افتراضية (صورة الأغنية)'}\n"
-        f"🖼 <b>الرد بصورة:</b> {photo_state}\n"
-        f"🎧 <b>جودة الصوت:</b> {AUDIO_Q_LABEL.get(CONFIG.get('audio_q'), 'عالية')}\n"
-        f"🎬 <b>جودة الفيديو:</b> {CONFIG.get('video_q', '720')}p\n\n"
-        "💡 <b>لتغيير صورة التشغيل:</b> أرسل أي صورة هنا مباشرة"
-    )
-
-
-def settings_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🖼 الرد بصورة", callback_data="st:photo"),
-            InlineKeyboardButton("🗑 حذف الصورة", callback_data="st:delthumb"),
-        ],
-        [
-            InlineKeyboardButton(f"🎧 جودة الصوت", callback_data="st:audio"),
-            InlineKeyboardButton(f"🎬 جودة الفيديو", callback_data="st:video"),
-        ],
-    ])
-
-
-# ================== خاص المطور ==================
-@bot.on_message(filters.private)
-async def private_handler(client: Client, m: Message):
-    uid = m.from_user.id if m.from_user else 0
-
-    if uid != DEV_ID:
-        await m.reply("👋 هذا بوت موسيقى للمجموعات.\nأضفني لمجموعتك وارفعني أدمن 🎵")
-        return
-
-    # صورة جديدة لصورة التشغيل
-    if m.photo:
-        CONFIG["thumb"] = m.photo.file_id
-        save_config()
-        await m.reply("✅ تم حفظ صورة التشغيل، راح تطلع مع كل أغنية 🖼")
-        await m.reply(settings_text(), reply_markup=settings_markup())
-        return
-
-    text = (m.text or "").strip()
-    if text in ("/start", "الاعدادات", "settings", "/settings"):
-        await m.reply(settings_text(), reply_markup=settings_markup())
-    elif text in ("/delthumb", "حذف الصورة"):
-        CONFIG["thumb"] = None
-        save_config()
-        await m.reply("🗑 تم حذف صورة التشغيل ورجعت لصورة الأغنية الافتراضية")
-    elif text in ("/help", "الاوامر"):
-        await m.reply(HELP_TEXT)
-    else:
-        await m.reply("أرسل صورة لتكون صورة التشغيل 🖼 أو اكتب <code>الاعدادات</code> ⚙️")
-
-
-# ================== أوامر الجروب ==================
-def match_cmd(text: str, words) -> str | None:
-    for w in words:
-        if text.startswith(w):
-            return text[len(w):].strip()
+# ---------- أوامر النصوص العربية (حظر/طرد/رتب/ايدي) ----------
+async def get_target(update):
+    """الشخص المستهدف: بالرد أو بالمنشن"""
+    msg = update.message
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        return msg.reply_to_message.from_user
+    if msg.reply_to_message and msg.reply_to_message.forward_from:
+        return msg.reply_to_message.forward_from
+    for ent in (msg.entities or []):
+        if ent.type == "text_mention":
+            return ent.user
     return None
 
+async def cmd_ban(update, ctx):
+    chat = update.effective_chat
+    if await user_level(update, chat) < 2:
+        return await update.message.reply_text("⚠ هذا الأمر لمدير فأعلى")
+    target = await get_target(update)
+    if not target:
+        return await update.message.reply_text("رد على الشخص اللي تبي تحظره")
+    if target.id == update.effective_user.id:
+        return await update.message.reply_text("ما تقدر تحظر نفسك 😅")
+    if target.id == ctx.bot.id:
+        return await update.message.reply_text("ما أقدر أحظر نفسي 😅")
+    if target.id == DEVELOPER_ID:
+        return await update.message.reply_text("⚠ ما أحد يقدر يحظر مطور البوت!")
+    try:
+        await chat.ban_member(target.id)
+    except Exception:
+        return await update.message.reply_text("❌ تأكد أن عندي صلاحية حظر الأعضاء")
+    await update.message.reply_text(
+        "⛔ تم حظر %s من الجروب\nبواسطة: %s" % (target.first_name, update.effective_user.first_name))
 
-@bot.on_message(filters.group & filters.text)
-async def group_commands(client: Client, m: Message):
-    text = (m.text or "").strip()
+async def cmd_kick(update, ctx):
+    chat = update.effective_chat
+    if await user_level(update, chat) < 1:
+        return await update.message.reply_text("⚠ هذا الأمر للمميز فأعلى")
+    target = await get_target(update)
+    if not target:
+        return await update.message.reply_text("رد على الشخص اللي تبي طرده")
+    if target.id == DEVELOPER_ID:
+        return await update.message.reply_text("⚠ ما أحد يقدر يطرد مطور البوت!")
+    try:
+        await chat.ban_member(target.id)
+        await chat.unban_member(target.id)   # يقدر يرجع
+    except Exception:
+        return await update.message.reply_text("❌ تأكد أن عندي صلاحية حظر الأعضاء")
+    await update.message.reply_text(
+        "👟 تم طرد %s من الجروب (يقدر يرجع)\nبواسطة: %s"
+        % (target.first_name, update.effective_user.first_name))
 
-    if text in ("الاوامر", "/start", "اوامر"):
-        await m.reply(HELP_TEXT)
+async def cmd_unban(update, ctx):
+    chat = update.effective_chat
+    if await user_level(update, chat) < 2:
+        return await update.message.reply_text("⚠ هذا الأمر لمدير فأعلى")
+    target = await get_target(update)
+    if not target:
+        return await update.message.reply_text("رد على الشخص أو اكتب الغاء الحظر + الايدي الرقمي")
+    args = update.message.text.split()
+    uid = target.id
+    if len(args) > 1 and args[1].lstrip("-").isdigit():
+        uid = int(args[1])
+    try:
+        await chat.unban_member(uid)
+    except Exception:
+        return await update.message.reply_text("❌ ما قدرت أفك الحظر")
+    await update.message.reply_text("✅ تم فك الحظر عن %s" % target.first_name)
+
+async def cmd_mute(update, ctx):
+    chat = update.effective_chat
+    if await user_level(update, chat) < 1:
+        return await update.message.reply_text("⚠ هذا الأمر للمميز فأعلى")
+    target = await get_target(update)
+    if not target:
+        return await update.message.reply_text("رد على الشخص اللي تبي تكتمه")
+    try:
+        await chat.restrict_member(target.id, ChatPermissions.no_permissions())
+    except Exception:
+        return await update.message.reply_text("❌ تأكد أن عندي صلاحية كتم الأعضاء")
+    await update.message.reply_text("🔇 تم كتم %s" % target.first_name)
+
+async def cmd_unmute(update, ctx):
+    chat = update.effective_chat
+    if await user_level(update, chat) < 1:
+        return await update.message.reply_text("⚠ هذا الأمر للمميز فأعلى")
+    target = await get_target(update)
+    if not target:
+        return await update.message.reply_text("رد على الشخص اللي تبي تفك كتمه")
+    try:
+        await chat.restrict_member(target.id, ChatPermissions.all_permissions())
+    except Exception:
+        return await update.message.reply_text("❌ ما قدرت أفك الكتم")
+    await update.message.reply_text("🔊 تم فك الكتم عن %s" % target.first_name)
+
+async def cmd_promote(update, ctx):
+    """رفع مالك / رفع مدير / رفع مميز (بالرد)"""
+    chat = update.effective_chat
+    text = update.message.text.strip()
+    rank = None
+    for r in RANK_LEVELS:
+        if ("رفع " + r) in text:
+            rank = r
+            break
+    if not rank:
         return
+    if await user_level(update, chat) < 3:
+        return await update.message.reply_text("⚠ رفع الرتب لمالك فأعلى")
+    target = await get_target(update)
+    if not target:
+        return await update.message.reply_text("رد على الشخص اللي تبي ترفعه")
+    if target.id == update.effective_user.id:
+        return await update.message.reply_text("ما تقدر ترفع نفسك 😅")
+    # مالك أساسي فقط يقدر يرفع مالك
+    if rank == "مالك" and await get_user_rank(update, chat) != "مالك اساسي":
+        return await update.message.reply_text("⚠ رفع مالك يحتاج المالك الأساسي")
+    trank = await get_target_rank(chat, target.id)
+    if RANK_LEVELS.get(trank, 0) >= RANK_LEVELS[rank]:
+        return await update.message.reply_text("الشخص رتبته أعلى أصلاً ⚠")
+    set_rank(chat.id, target.id, rank)
+    await update.message.reply_text(
+        "🎉 تم رفع %s إلى رتبة %s\nبواسطة: %s"
+        % (target.first_name, RANK_BADGES[rank], update.effective_user.first_name))
 
-    # فيديو
-    q = match_cmd(text, VIDEO_WORDS)
-    if q is not None:
-        if not q:
-            await m.reply("اكتب اسم الأغنية بعد الأمر ✍️ مثال: فيد انا مشيت")
-            return
-        await handle_play(m, q, video=True)
+async def cmd_demote(update, ctx):
+    chat = update.effective_chat
+    if await user_level(update, chat) < 3:
+        return await update.message.reply_text("⚠ تنزيل الرتب لمالك فأعلى")
+    target = await get_target(update)
+    if not target:
+        return await update.message.reply_text("رد على الشخص اللي تبي تنزله")
+    if target.id == DEVELOPER_ID:
+        return await update.message.reply_text("⚠ ما أحد يقدر ينزل مطور البوت!")
+    if await get_target_rank(chat, target.id) == "مالك اساسي":
+        return await update.message.reply_text("ما نقدر ننزل المالك الأساسي ⚠")
+    set_rank(chat.id, target.id, None)
+    await update.message.reply_text("📥 تم تنزيل %s من الرتب" % target.first_name)
+
+async def cmd_id(update, ctx):
+    chat = update.effective_chat
+    target = await get_target(update) or update.effective_user
+    if target.id == DEVELOPER_ID:
+        rank, badge = "مطور", "👨‍💻 مطور البوت"
+    else:
+        rank = await get_target_rank(chat, target.id)
+        badge = RANK_BADGES.get(rank, "👤 عضو")
+    uname = "@" + target.username if target.username else "لا يوجد"
+    await update.message.reply_text(
+        "📇 <b>بيانات الحساب</b>\n"
+        "الاسم: %s\n"
+        "المعرف: %s\n"
+        "الايدي: <code>%s</code>\n"
+        "الرتبة: %s\n"
+        "رتبة البوت: %s\n"
+        "ايدي الجروب: <code>%s</code>"
+        % (target.first_name, uname, target.id, badge, badge,
+           chat.id),
+        parse_mode="HTML")
+
+# ---------- الألعاب ----------
+GAMES = {}
+
+async def cmd_game(update, ctx):
+    chat = update.effective_chat
+    num = random.randint(1, 100)
+    GAMES[chat.id] = {"num": num, "by": update.effective_user.first_name}
+    await update.message.reply_text(
+        "🎲 بدأت لعبة تخمين الرقم!\nاخترت رقم بين 1 و 100، من يخمنه أول؟\n"
+        "اكتب رقمك مباشرة، أو (الغاء اللعبة) للإيقاف")
+
+async def cmd_cancel_game(update, ctx):
+    if GAMES.pop(update.effective_chat.id, None):
+        await update.message.reply_text("🛑 تم إيقاف اللعبة")
+
+async def cmd_dice(update, ctx):
+    await update.message.reply_dice()
+
+async def cmd_rps(update, ctx):
+    bot_choice = random.choice(["حجره", "ورقه", "مقص"])
+    emoji = {"حجره": "✊", "ورقه": "✋", "مقص": "✌️"}
+    await update.message.reply_text(
+        "اخترت %s %s\nاكتب (حجره ورقه مقص) مرة ثانية للعب مجدداً"
+        % (bot_choice, emoji[bot_choice]))
+
+# ---------- الحماية ----------
+LINK_RE = re.compile(r"(https?://|t\.me/|www\.|\S+\.(com|net|org|xyz|io|me)\b)", re.I)
+BAN_WORDS = {"حظر", "طرد", "الغاء الحظر", "فك الحظر", "كتم", "فك الكتم",
+             "رفع مالك", "رفع مدير", "رفع مميز", "تنزيل", "ايدي",
+             "لعبة", "نرد", "حجره ورقه مقص", "الغاء اللعبة"}
+
+async def check_message(update: Update, ctx):
+    msg = update.message
+    if not msg or not msg.text or msg.from_user.is_bot:
         return
+    chat = update.effective_chat
+    text = msg.text.strip()
+    low = text.lower()
+    s = get_settings(chat.id)
 
-    # صوت
-    q = match_cmd(text, AUDIO_WORDS)
-    if q is not None:
-        if not q:
-            await m.reply("اكتب اسم الأغنية بعد الأمر ✍️ مثال: شغل انا مشيت")
-            return
-        await handle_play(m, q, video=False)
-        return
+    # ----- الأوامر النصية -----
+    if text.startswith("حظر"):
+        return await cmd_ban(update, ctx)
+    if text.startswith("طرد"):
+        return await cmd_kick(update, ctx)
+    if text.startswith("الغاء الحظر") or text.startswith("فك الحظر"):
+        return await cmd_unban(update, ctx)
+    if text.startswith("كتم"):
+        return await cmd_mute(update, ctx)
+    if text.startswith("فك الكتم"):
+        return await cmd_unmute(update, ctx)
+    if text.startswith("رفع ") and any("رفع " + r in text for r in RANK_LEVELS):
+        return await cmd_promote(update, ctx)
+    if text == "تنزيل":
+        return await cmd_demote(update, ctx)
+    if text == "ايدي" or text == "أيدي" or text == "/id" or text.startswith("ايدي "):
+        return await cmd_id(update, ctx)
+    if text == "لعبة" or text == "اللعبة":
+        return await cmd_game(update, ctx)
+    if text == "الغاء اللعبة":
+        return await cmd_cancel_game(update, ctx)
+    if text == "نرد":
+        return await cmd_dice(update, ctx)
+    if low in ("حجره", "ورقه", "مقص", "حجره ورقه مقص"):
+        return await cmd_rps(update, ctx)
 
-    # بحث بأزرار
-    q = match_cmd(text, SEARCH_WORDS)
-    if q is not None:
-        if not q:
-            await m.reply("اكتب اسم الأغنية بعد الأمر ✍️ مثال: يوت انا مشيت")
-            return
-        await handle_search_buttons(m, q)
-        return
-
-    # تخطي
-    if text.startswith("تخطي"):
-        chat_id = m.chat.id
-        if QUEUE.get(chat_id):
-            await m.reply("⏭️ تخطيت، نشغل اللي بعده...")
-            await play_next(chat_id)
+    # ----- تخمين رقم اللعبة -----
+    game = GAMES.get(chat.id)
+    if game and text.isdigit() and 1 <= int(text) <= 100:
+        g = int(text)
+        if g == game["num"]:
+            GAMES.pop(chat.id)
+            await msg.reply_text("🎉 مبروك %s! الرقم الصحيح هو %d، فزت باللعبة!"
+                                 % (msg.from_user.first_name, g))
+        elif g < game["num"]:
+            await msg.reply_text("⬆ رقمك أقل، جرب رقم أكبر")
         else:
-            PLAYING.pop(chat_id, None)
-            try:
-                await call_py.leave_call(chat_id)
-            except Exception:
-                pass
-            await m.reply("⏭️ ما فيه أغنية بعدها، طلعت من المكالمة")
+            await msg.reply_text("⬇ رقمك أعلى، جرب رقم أصغر")
         return
 
-    # ايقاف
-    if text.startswith("ايقاف"):
-        chat_id = m.chat.id
-        QUEUE.pop(chat_id, None)
-        PLAYING.pop(chat_id, None)
+    # ----- الحماية: تجاهل المشرفين وأصحاب الرتب -----
+    if await user_level(update, chat) >= 1:
+        return
+
+    # 1) الروابط
+    if s["antilink"] and LINK_RE.search(text):
         try:
-            await call_py.leave_call(chat_id)
+            await msg.delete()
+            await chat.restrict_member(msg.from_user.id, ChatPermissions.no_permissions())
+            await chat.send_message("🚫 ممنوع نشر الروابط %s - تم كتمه"
+                                    % msg.from_user.first_name)
         except Exception:
             pass
-        await m.reply("⏹️ تم إيقاف كل الأغاني والخروج من المكالمة")
         return
 
-    # اسكت
-    if text.startswith("اسكت"):
+    # 2) الكلمات المسيئة
+    if s["badwords"] and any(w in low for w in s["bad_words_list"]):
         try:
-            await call_py.pause(m.chat.id)
-            await m.reply("⏸️ سكتّها مؤقتاً، اكتب كمل عشان ترجع")
+            await msg.delete()
         except Exception:
-            await m.reply("❌ ما فيه أغنية تشتغل")
+            pass
         return
 
-    # كمل
-    if text.startswith("كمل"):
-        try:
-            await call_py.resume(m.chat.id)
-            await m.reply("▶️ كملنا من وين توقفت")
-        except Exception:
-            await m.reply("❌ ما فيه شي موقّف")
+    # 3) السبام
+    if s["antiflood"]:
+        uid = (chat.id, msg.from_user.id)
+        now = time.time()
+        hist = ctx.bot_data.setdefault("flood", {}).setdefault(uid, [])
+        hist[:] = [t for t in hist if now - t < 10]
+        hist.append(now)
+        if len(hist) > s["flood_limit"]:
+            hist.clear()
+            try:
+                await chat.restrict_member(msg.from_user.id, ChatPermissions.no_permissions())
+                await chat.send_message("🔇 تم كتم %s بسبب التكرار" % msg.from_user.first_name)
+            except Exception:
+                pass
 
+# ---------- الترحيب ----------
+async def welcome(update: Update, ctx):
+    chat = update.effective_chat
+    s = get_settings(chat.id)
+    if not s["welcome"]:
+        return
+    for u in update.message.new_chat_members:
+        if u.is_bot:
+            continue
+        await chat.send_message(s["welcome_msg"].format(name=u.first_name, chat=chat.title))
 
-# ================== نهاية الأغنية -> التالية ==================
-@call_py.on_update(fl.stream_end())
-async def on_stream_end(_: PyTgCalls, update: StreamEnded):
-    log.info(f"stream ended in {update.chat_id}")
-    PLAYING.pop(update.chat_id, None)
-    await play_next(update.chat_id)
+# ---------- التشغيل ----------
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("settings", show_settings))
+    app.add_handler(CommandHandler("dev", dev_cmd))
+    for cmd in ("antilink", "antiflood", "badwords", "welcome"):
+        app.add_handler(CommandHandler(cmd, toggle_cmd))
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
+    app.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.COMMAND, check_message))
+    print("البوت يعمل الآن...")
+    app.run_polling()
 
-
-log.info("يشتغل بوت الموسيقى...")
-call_py.run()
+if __name__ == "__main__":
+    main()
