@@ -29,9 +29,13 @@ assistant = TelegramClient(StringSession(ASSISTANT_SESSION), ASSISTANT_API_ID, A
 call_py = PyTgCalls(assistant)
 
 CHANNEL_USER = "@ARIA1D"
-DB_FILE = "bot_settings.json"
+↢ تحميل من اليوتيوب والساوند والتيك.\n"
+            "↢ تشغيل المقاطع بالمكالمات : اكتب الDB_FILE = "bot_settings.json"
+
+DB_FILE = "t_settings.json"
 
 def load_settings():
+    import os
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -52,6 +56,8 @@ def load_settings():
         ),
         "image": "https://telegra.ph",
         "users": []
+    }
+
     }
 
 def save_settings(data):
