@@ -1,6 +1,8 @@
 import asyncio
 import json
 import logging
+
+from concurrent.futures import ThreadPoolExecutor
 import os
 import re
 import uuid
@@ -116,7 +118,9 @@ def ydl_opts(client=None, flat=False):
         "skip_download": True,
         "nocheckcertificate": True,
         "geo_bypass": True,
-        "socket_timeout": 25,
+        "socket_timeout": 10,
+        "retries": 1,
+        "extractor_retries": 1,
     }
     if COOKIE_FILE:
         o["cookiefile"] = COOKIE_FILE
@@ -138,6 +142,7 @@ def flat_search(query, n=5):
     vid = best["id"]
     return {
         "title": best.get("title") or query,
+        "q": query,
         "url": f"https://www.youtube.com/watch?v={vid}",
         "dur": int(best.get("duration") or 0),
         "thumb": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
@@ -174,7 +179,7 @@ def pick_format(info, want_video):
     }
 
 
-YT_CLIENTS = ["default", "ios", "mweb", "tv", "web_safari"]
+YT_CLIENTS = ["ios", "mweb"]
 
 
 def yt_full_extract(url, want_video=False):
@@ -194,46 +199,96 @@ def yt_full_extract(url, want_video=False):
     raise SourceError(last_err or "all clients failed")
 
 
-def sc_fallback(title):
+def sc_queries(item):
+    """صيغ بحث ذكية لساوند كلاود: نص المستخدم أولاً ثم العنوان المنظف"""
+    qs = []
+    if item.get("q"):
+        qs.append(item["q"])
+    title = item.get("title") or ""
+    base = re.split(r"\s*[|\-–—،]\s*", title)[0].strip()
+    if base:
+        qs.append(base)
+    # كلمات عربية فقط بدون الكلمات الإنجليزية الزائدة
+    ar = [w for w in title.split() if not re.match(r"^[A-Za-z0-9()&.:\-]+$", w)]
+    if ar:
+        qs.append(" ".join(ar[:6]))
+    qs.append(title)
+    return list(dict.fromkeys(q for q in qs if q))
+
+
+def sc_fallback(item):
     """بحث بديل في ساوند كلاود (ما ينحجب من سيرفرات الاستضافة)"""
-    with yt_dlp.YoutubeDL(ydl_opts()) as ydl:
-        info = ydl.extract_info(f"scsearch4:{title}", download=False)
-    for e in (info or {}).get("entries") or []:
-        if not e:
+    for q in sc_queries(item):
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts()) as ydl:
+                info = ydl.extract_info(f"scsearch4:{q}", download=False)
+            for e in (info or {}).get("entries") or []:
+                if not e:
+                    continue
+                fmts = [f for f in (e.get("formats") or []) if f.get("acodec") not in (None, "none") and f.get("url")]
+                if not fmts:
+                    continue
+                return {
+                    "stream_url": fmts[-1]["url"],
+                    "title": e.get("title") or q,
+                    "dur": int(e.get("duration") or 0),
+                    "thumb": e.get("thumbnail"),
+                }
+        except Exception:
             continue
-        fmts = [f for f in (e.get("formats") or []) if f.get("acodec") not in (None, "none") and f.get("url")]
-        if not fmts:
-            continue
-        return {
-            "stream_url": fmts[-1]["url"],
-            "title": e.get("title") or title,
-            "dur": int(e.get("duration") or 0),
-            "thumb": e.get("thumbnail"),
-        }
     raise SourceError("no sc results")
 
 
 def resolve_stream(item):
-    """يحول الأغنية إلى رابط تشغيل مباشر، مع سقوط تلقائي لساوند كلاود"""
+    """يحول الأغنية إلى رابط تشغيل مباشر بأسرع طريقة:
+    يشتغل على يوتيوب وساوند كلاود بنفس الوقت ويخذ اللي يخلص أولاً"""
     if item.get("stream_url"):
         return item["stream_url"]
-    last_err = None
-    try:
-        res = yt_full_extract(item["url"], want_video=bool(item.get("video")))
-        item.update(res)
-        item["source"] = "youtube"
-        return res["stream_url"]
-    except Exception as ex:
-        last_err = ex
-        log.warning(f"youtube blocked, trying soundcloud: {str(ex)[:100]}")
+
+    def yt_try():
+        return yt_full_extract(item["url"], want_video=bool(item.get("video")))
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        yt_fut = ex.submit(yt_try)
+        sc_fut = ex.submit(sc_fallback, item)
+        # نعطي يوتيوب 8 ثواني بس (أحياناً يكون محجوب وبطيء)
+        yt_done = yt_fut.done()
+        if not yt_done:
+            import time
+            deadline = time.time() + 8
+            while time.time() < deadline and not yt_fut.done():
+                time.sleep(0.2)
+        if yt_fut.done() and yt_fut.exception() is None:
+            res = yt_fut.result()
+            item.update(res)
+            item["source"] = "youtube"
+            sc_fut.cancel()
+            return res["stream_url"]
+        # يوتيوب فشل أو بطيء => ساوند كلاود (غالباً جاهز من زمان)
         try:
-            res = sc_fallback(item["title"])
-            res["video"] = False  # ساوند كلاود صوت فقط
+            res = sc_fut.result(timeout=15)
+            res["video"] = False
             item.update(res)
             item["source"] = "soundcloud"
             return res["stream_url"]
-        except Exception as ex2:
-            raise SourceError(f"{last_err} / {ex2}")
+        except Exception:
+            # ساوند كلاود تعثر مرة، نعطيه محاولة ثانية سريعة
+            try:
+                res = ex.submit(sc_fallback, item).result(timeout=15)
+                res["video"] = False
+                item.update(res)
+                item["source"] = "soundcloud"
+                return res["stream_url"]
+            except Exception:
+                pass
+            # ما فيه ساوند كلاود => ننتظر يوتيوب للآخر
+            try:
+                res = yt_fut.result(timeout=25)
+                item.update(res)
+                item["source"] = "youtube"
+                return res["stream_url"]
+            except Exception as e:
+                raise SourceError(e)
 
 
 def search_track(query):
@@ -400,6 +455,16 @@ async def cleanup_chat(chat_id: int):
     MSG_IDS.pop(chat_id, None)
 
 
+async def prefetch_next(chat_id: int):
+    """يجيب رابط الأغنية الجاية قبل ما تخلص الحالية، عشان تبدأ فوراً"""
+    try:
+        q = QUEUE.get(chat_id)
+        if q and not q[0].get("stream_url"):
+            await asyncio.to_thread(resolve_stream, q[0])
+    except Exception:
+        pass
+
+
 async def play_next(chat_id: int):
     if LOOP.get(chat_id) and chat_id in PLAYING:
         item = PLAYING[chat_id]
@@ -418,6 +483,7 @@ async def play_next(chat_id: int):
         try:
             await play_item(chat_id, item)
             await send_now(chat_id, item)
+            asyncio.create_task(prefetch_next(chat_id))
         except Exception as e:
             log.error(f"play error: {e}")
             await bot.send_message(chat_id, "⚠️ تعذر تشغيل هذا المقطع، جاري تجربة التالي...")
@@ -482,6 +548,7 @@ async def start_playing(m, item: dict, video: bool, edit=None):
         else:
             await m.reply(err)
         return
+    asyncio.create_task(prefetch_next(chat_id))
     if edit:
         await edit(
             f"{'🎬 فيديو' if item['video'] else '🎵 صوت'} <b>• تبدا تشتغل الآن</b>\n\n"
@@ -589,6 +656,7 @@ async def on_button(client, cq):
             f"📀 <b>العنوان:</b> {item['title']}\n"
             f"👤 <b>طلبها:</b> {item.get('by') or '-'}"
         )
+        asyncio.create_task(prefetch_next(chat_id))
         return
 
     if data.startswith("ctl:"):
@@ -702,6 +770,11 @@ async def private_handler(client, m):
         await m.reply("أرسل صورة لتكون صورة التشغيل 🖼 أو اكتب <code>الاعدادات</code> ⚙️")
 
 
+# كلمات الأوامر (كلها اختصارات لبعضها، وتشمل كلمات النسخة القديمة)
+VIDEO_WORDS = ["فيد", "فيديو", "شغل فيديو", "تشغيل فيديو", "v "]
+AUDIO_WORDS = ["شغل", "تشغيل", "صوت", "اسمع", "play", "p "]
+SEARCH_WORDS = ["يوت", "بحث", "yt", "search"]
+
 # ================== أوامر الجروب ==================
 def match_cmd(text: str, words):
     for w in words:
@@ -721,7 +794,6 @@ async def group_commands(client, m):
     # روابط مباشرة
     if text.startswith("http://") or text.startswith("https://"):
         q = text.split()[0]
-        is_video_url = any(x in q for x in ("youtu.be", "youtube.com"))
         await handle_play(m, q, video=False)
         return
 
