@@ -29,7 +29,7 @@ DB_FILE = "t_settings.json"
 
 bot = TelegramClient('aria_bot_session', ASSISTANT_API_ID, ASSISTANT_API_HASH).start(bot_token=BOT_TOKEN)
 assistant = TelegramClient(StringSession(ASSISTANT_SESSION), ASSISTANT_API_ID, ASSISTANT_API_HASH)
-call_py = PyTgCalls(assistant)
+#call_py = PyTgCalls(assistant)
 
 def load_settings():
     if os.path.exists(DB_FILE):
