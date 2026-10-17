@@ -20,7 +20,7 @@ ASSISTANT_API_HASH = '4e5dd535ba915df2bcdd968d167cd3cb'
 ASSISTANT_SESSION = '1BJWap1wBuxxZOH7XqLOV4x2l_ulSey8IZ6TkYsUixYI-MydO68HvcpBwMKhcOqYqFMOKuvM7pY1eEu3i_jRrwWzXv__CPb1-LKHZnw5AM4WuadsTmRTHWFBVMPdXIe6EJZK7MEBBbRxEBuQBsTDASfH7hNFlXsdKV7NLjJPtgcDi7fJs8_dmUpUigt_1qh-AnqpT3uhKKOyhheUshBNs3MeaRM7sviGpK0q_a3zJygPgOM-sOugUVnEsgXx6RAvi0UpuQdJATdWkI1KGPUvOKut3VanOL4kJ2rFLOkSlzgWMEFarA5OXlOVYktgpUjiyoHOAUIXFg1MMapDSXFWVy01hAmjzu2U='
 
 # ⚠️ ضع هنا توكن البوت الرسمي الخاص بك المستخرج من @BotFather
-BOT_TOKEN = 'your_bot_token_here'
+BOT_TOKEN = '8750112907:AAHUhh9WI1E_BMW6TczwFL1jJRzLsYAIqPQ'
 
 # ==============================================================
 
