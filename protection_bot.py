@@ -29,8 +29,6 @@ assistant = TelegramClient(StringSession(ASSISTANT_SESSION), ASSISTANT_API_ID, A
 call_py = PyTgCalls(assistant)
 
 CHANNEL_USER = "@ARIA1D"
-↢ تحميل من اليوتيوب والساوند والتيك.\n"
-            "↢ تشغيل المقاطع بالمكالمات : اكتب الDB_FILE = "bot_settings.json"
 
 DB_FILE = "t_settings.json"
 
@@ -58,7 +56,6 @@ def load_settings():
         "users": []
     }
 
-    }
 
 def save_settings(data):
     with open(DB_FILE, "w", encoding="utf-8") as f:
