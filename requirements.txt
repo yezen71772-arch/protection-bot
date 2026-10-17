@@ -1,3 +1,0 @@
-telethon
-py-tgcalls
-asyncio
