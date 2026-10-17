@@ -3,9 +3,9 @@ import json
 import os
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
-from pytgcalls import PyTgCalls
-from pytgcalls.types import AudioVideoPiped, AudioPiped
-import yt_dlp
+# from pytgcalls import PyTgCalls
+# from pytgcalls.types import AudioVideoPiped, AudioPiped
+
 
 # ==================== [ إعدادات البيانات ] ====================
 
